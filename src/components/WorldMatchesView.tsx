@@ -7,6 +7,7 @@ import {
   Loader2,
   Lock,
   Plus,
+  RefreshCw,
   RotateCcw,
   Search,
   Sparkles,
@@ -15,19 +16,22 @@ import {
   X,
 } from 'lucide-react';
 import { FALLBACK_LEAGUES, TACTICAL_FORMATIONS } from '../data/fallbackData';
+import { WORLD_MANAGERS } from '../data/worldManagers';
 import { getTeam, getWorldMatches, searchGlobal } from '../services/gasApi';
 import type {
   FormationSlot,
   MatchMentality,
   Player,
+  TeamManagerProfile,
   WorldMatch,
 } from '../types/footy';
-import { formatMarketValue, getPositionGroup } from '../utils/analytics';
+import { findClubManager, formatMarketValue, getPositionGroup } from '../utils/analytics';
 import { evaluateSlotFit, predictMatchFromLineups } from '../utils/matchPredictor';
 import { PlayerAvatar } from './PlayerAvatar';
 
 interface WorldMatchesViewProps {
   players: Player[];
+  managers?: TeamManagerProfile[];
   onOpenPlayer: (player: Player) => void;
 }
 
@@ -194,7 +198,11 @@ function buildAutoLineup(
   return out;
 }
 
-export function WorldMatchesView({ players, onOpenPlayer }: WorldMatchesViewProps) {
+export function WorldMatchesView({
+  players,
+  managers = WORLD_MANAGERS,
+  onOpenPlayer,
+}: WorldMatchesViewProps) {
   const [leagueFilter, setLeagueFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'All' | WorldMatch['status']>('All');
   const [searchQuery, setSearchQuery] = useState('');
@@ -208,10 +216,13 @@ export function WorldMatchesView({ players, onOpenPlayer }: WorldMatchesViewProp
   const [awayFormationId, setAwayFormationId] = useState<string>(TACTICAL_FORMATIONS[2].id);
   const [homeMentality, setHomeMentality] = useState<MatchMentality>('High Press');
   const [awayMentality, setAwayMentality] = useState<MatchMentality>('Balanced');
+  const [homeManagerId, setHomeManagerId] = useState<string>(managers[0]?.id || '');
+  const [awayManagerId, setAwayManagerId] = useState<string>(managers[1]?.id || managers[0]?.id || '');
 
   const [homeAssignments, setHomeAssignments] = useState<Record<string, string>>({});
   const [awayAssignments, setAwayAssignments] = useState<Record<string, string>>({});
   const userEditedLineupRef = useRef<boolean>(false);
+  const userEditedManagersRef = useRef<boolean>(false);
 
   // Draggable Player Pool controls
   const [poolScope, setPoolScope] = useState<'all' | 'home' | 'away'>('all');
@@ -292,11 +303,17 @@ export function WorldMatchesView({ players, onOpenPlayer }: WorldMatchesViewProp
     [awayFormationId]
   );
 
-  // Auto-populate Home & Away XI + hydrate real club squads whenever selectedMatch changes
+  // Auto-populate Home & Away XI + auto-select Club Managers + hydrate real club squads
   useEffect(() => {
     if (!selectedMatch) return;
     let active = true;
     userEditedLineupRef.current = false;
+    userEditedManagersRef.current = false;
+
+    const matchedHomeMgr = findClubManager(selectedMatch.homeClubName, managers);
+    const matchedAwayMgr = findClubManager(selectedMatch.awayClubName, managers);
+    if (matchedHomeMgr) setHomeManagerId(matchedHomeMgr.id);
+    if (matchedAwayMgr) setAwayManagerId(matchedAwayMgr.id);
 
     const hf =
       TACTICAL_FORMATIONS.find((f) => f.id === selectedMatch.homeFormation) ||
@@ -465,23 +482,57 @@ export function WorldMatchesView({ players, onOpenPlayer }: WorldMatchesViewProp
     return out;
   }, [awayFormation, awayAssignments, playerMap]);
 
+  const homeManager = useMemo(
+    () =>
+      managers.find((m) => m.id === homeManagerId) ||
+      (selectedMatch ? findClubManager(selectedMatch.homeClubName, managers) : undefined) ||
+      managers[0],
+    [managers, homeManagerId, selectedMatch]
+  );
+
+  const awayManager = useMemo(
+    () =>
+      managers.find((m) => m.id === awayManagerId) ||
+      (selectedMatch ? findClubManager(selectedMatch.awayClubName, managers) : undefined) ||
+      managers[1] ||
+      managers[0],
+    [managers, awayManagerId, selectedMatch]
+  );
+
+  // Sync live-discovered managers when managers array expands after getTeam
+  useEffect(() => {
+    if (!selectedMatch || userEditedManagersRef.current) return;
+    const h = findClubManager(selectedMatch.homeClubName, managers);
+    const a = findClubManager(selectedMatch.awayClubName, managers);
+    if (h) setHomeManagerId(h.id);
+    if (a) setAwayManagerId(a.id);
+  }, [managers, selectedMatch?.id]);
+
   const prediction = useMemo(
     () =>
       predictMatchFromLineups({
         homeSlots: homeFormation.slots,
         homeAssignments: homeAssignedBySlot,
         homeMentality,
+        homeFormationName: homeFormation.name,
+        homeManager,
         awaySlots: awayFormation.slots,
         awayAssignments: awayAssignedBySlot,
         awayMentality,
+        awayFormationName: awayFormation.name,
+        awayManager,
       }),
     [
       homeFormation.slots,
+      homeFormation.name,
       homeAssignedBySlot,
       homeMentality,
+      homeManager,
       awayFormation.slots,
+      awayFormation.name,
       awayAssignedBySlot,
       awayMentality,
+      awayManager,
     ]
   );
 
@@ -760,21 +811,42 @@ export function WorldMatchesView({ players, onOpenPlayer }: WorldMatchesViewProp
           ))}
         </div>
 
-        <div className="flex items-center gap-1 p-1 rounded-xl bg-[#E4EFED] dark:bg-[#0D1A1C] border border-[#D4E3E0] dark:border-[#1B3335] w-fit shrink-0">
-          {(['All', 'Upcoming', 'Live', 'Finished'] as const).map((st) => (
-            <button
-              key={st}
-              type="button"
-              onClick={() => setStatusFilter(st)}
-              className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-                statusFilter === st
-                  ? 'bg-[#136F73] text-white'
-                  : 'text-[#486563] dark:text-[#8FB3B0] hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              {st === 'All' ? 'Semua' : st}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setLoadingMatches(true);
+              getWorldMatches(leagueFilter).then((res) => {
+                setMatches(res);
+                setLoadingMatches(false);
+                if (res.length > 0 && !res.some((m) => m.id === selectedMatchId)) {
+                  setSelectedMatchId(res[0].id);
+                }
+              });
+            }}
+            disabled={loadingMatches}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border border-[#DCE8E6] dark:border-[#1B3335] bg-white dark:bg-[#0F1E20] text-slate-700 dark:text-slate-200 hover:border-[#136F73] transition-colors whitespace-nowrap"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingMatches ? 'animate-spin' : ''}`} />
+            Segarkan
+          </button>
+
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-[#E4EFED] dark:bg-[#0D1A1C] border border-[#D4E3E0] dark:border-[#1B3335] w-fit shrink-0">
+            {(['All', 'Upcoming', 'Live', 'Finished'] as const).map((st) => (
+              <button
+                key={st}
+                type="button"
+                onClick={() => setStatusFilter(st)}
+                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                  statusFilter === st
+                    ? 'bg-[#136F73] text-white'
+                    : 'text-[#486563] dark:text-[#8FB3B0] hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                {st === 'All' ? 'Semua' : st}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -1041,8 +1113,12 @@ export function WorldMatchesView({ players, onOpenPlayer }: WorldMatchesViewProp
               </div>
             </div>
 
-            {/* 4 Tactical Edge Meters */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-2 border-t border-slate-100 dark:border-slate-800">
+            {/* 5 Tactical Edge Meters (including Sinergi Pelatih) */}
+            <div
+              className={`grid grid-cols-1 sm:grid-cols-2 ${
+                prediction.tacticalEdges.length >= 5 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'
+              } gap-4 pt-2 border-t border-slate-100 dark:border-slate-800`}
+            >
               {prediction.tacticalEdges.map((edge) => (
                 <div key={edge.label} className="space-y-1.5">
                   <div className="flex items-center justify-between text-xs">
@@ -1197,6 +1273,13 @@ export function WorldMatchesView({ players, onOpenPlayer }: WorldMatchesViewProp
                 setFormationId: setHomeFormationId,
                 mentality: homeMentality,
                 setMentality: setHomeMentality,
+                manager: homeManager,
+                managerId: homeManagerId,
+                setManagerId: (id: string) => {
+                  userEditedManagersRef.current = true;
+                  setHomeManagerId(id);
+                },
+                synergyPct: prediction.homeManagerSynergyPct,
                 assigned: homeAssignedBySlot,
                 outOfPositionCount: prediction.homeOutOfPositionCount,
                 ringColor: 'bg-teal-500/90',
@@ -1212,6 +1295,13 @@ export function WorldMatchesView({ players, onOpenPlayer }: WorldMatchesViewProp
                 setFormationId: setAwayFormationId,
                 mentality: awayMentality,
                 setMentality: setAwayMentality,
+                manager: awayManager,
+                managerId: awayManagerId,
+                setManagerId: (id: string) => {
+                  userEditedManagersRef.current = true;
+                  setAwayManagerId(id);
+                },
+                synergyPct: prediction.awayManagerSynergyPct,
                 assigned: awayAssignedBySlot,
                 outOfPositionCount: prediction.awayOutOfPositionCount,
                 ringColor: 'bg-amber-500/90',
@@ -1269,6 +1359,39 @@ export function WorldMatchesView({ players, onOpenPlayer }: WorldMatchesViewProp
                     </select>
                   </div>
                 </div>
+
+                {/* Manager Parameter Selector + Synergy Telemetry */}
+                {managers.length > 0 && (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-50 dark:bg-[#0B1718] border border-slate-200/80 dark:border-slate-800">
+                    <select
+                      aria-label={`Pelatih ${team.title}`}
+                      value={team.manager?.id || team.managerId}
+                      onChange={(e) => team.setManagerId(e.target.value)}
+                      className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white dark:bg-[#0F1E20] border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100"
+                    >
+                      {managers.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.managerName} · {m.clubName} ({m.primaryFormation})
+                        </option>
+                      ))}
+                    </select>
+                    {team.manager && (
+                      <div className="flex items-center gap-2.5 text-[11px] font-mono-num shrink-0 px-1">
+                        <span className="text-slate-500">
+                          PPG {(team.manager.pointsPerGame ?? 1.8).toFixed(2)}
+                        </span>
+                        <span className="text-slate-500">
+                          Win {(team.manager.winRatePct ?? 54).toFixed(0)}%
+                        </span>
+                        {team.synergyPct !== undefined && (
+                          <span className={`font-bold ${team.accentText}`}>
+                            XI Synergy {team.synergyPct}%
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* 2D Interactive Dropzone Pitch for Team XI */}
                 <div className="relative w-full aspect-[4/4.6] sm:aspect-[16/14] rounded-2xl overflow-hidden border border-slate-300 dark:border-slate-700 bg-[#0F2A1D] select-none shadow-inner">

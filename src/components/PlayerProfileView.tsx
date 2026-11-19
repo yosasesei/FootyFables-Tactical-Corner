@@ -1,17 +1,27 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   ArrowLeft,
   ArrowRightLeft,
+  Award,
   CheckCircle2,
   Compass,
   GitCompare,
+  HeartPulse,
   RefreshCw,
   TrendingDown,
   TrendingUp,
+  UserCheck,
 } from 'lucide-react';
+import { WORLD_MANAGERS } from '../data/worldManagers';
 import { getPlayer } from '../services/gasApi';
-import type { Player } from '../types/footy';
-import { formatMarketValue } from '../utils/analytics';
+import type { Player, TeamManagerProfile } from '../types/footy';
+import {
+  calculateTacticalFit,
+  findClubManager,
+  formatMarketValue,
+  rankManagersForPlayer,
+} from '../utils/analytics';
 import { MarketValueChart } from './MarketValueChart';
 import { MatchRatingTrendChart } from './MatchRatingTrendChart';
 import { PlayerAvatar } from './PlayerAvatar';
@@ -19,21 +29,82 @@ import { RADAR_PALETTE, RadarChart } from './RadarChart';
 
 interface PlayerProfileViewProps {
   player: Player;
+  managers?: TeamManagerProfile[];
   onBack: () => void;
   onAddToCompare: (fotmobId: string) => void;
-  onOpenFitEngine: (fotmobId: string) => void;
+  onOpenFitEngine: (fotmobId: string, managerId?: string) => void;
   onPlayerUpdated?: (player: Player) => void;
 }
 
 export function PlayerProfileView({
   player,
+  managers = WORLD_MANAGERS,
   onBack,
   onAddToCompare,
   onOpenFitEngine,
   onPlayerUpdated,
 }: PlayerProfileViewProps) {
   const [refreshing, setRefreshing] = useState(false);
+  const autoHydratedIdsRef = useRef<Set<string>>(new Set());
   const isPositiveMv = player.marketValueChangePct >= 0;
+
+  // Automatically hydrate live Opta telemetry, real club fixtures, and salimt datalake if player record is still sparse
+  useEffect(() => {
+    const hasLiveFixtures = Boolean(player.recentMatches?.some((m) => m.isLiveFixture));
+    const hasOpta = Boolean(player.dataSources?.includes('Opta/FotMob Live'));
+    if (hasLiveFixtures && hasOpta) return;
+    if (autoHydratedIdsRef.current.has(player.fotmobId)) return;
+
+    autoHydratedIdsRef.current.add(player.fotmobId);
+    let active = true;
+    setRefreshing(true);
+    getPlayer({
+      fotmobId: player.fotmobId,
+      tmId: player.tmId,
+      name: player.name,
+      clubId: player.clubId,
+    })
+      .then((hydrated) => {
+        if (!active) return;
+        setRefreshing(false);
+        if (hydrated && onPlayerUpdated) {
+          onPlayerUpdated(hydrated);
+        }
+      })
+      .catch(() => {
+        if (active) setRefreshing(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [player.fotmobId]);
+
+  const clubManager = useMemo(
+    () => findClubManager(player.club, managers),
+    [player.club, managers]
+  );
+
+  const clubManagerFit = useMemo(() => {
+    if (!clubManager) return null;
+    return calculateTacticalFit(
+      player,
+      {
+        pressingIntensity: clubManager.pressingIntensity,
+        possessionFocus: clubManager.possessionFocus,
+        transitionSpeed: clubManager.transitionSpeed,
+        buildUpStyle: clubManager.buildUpStyle,
+        defensiveLine: clubManager.defensiveLine,
+        aerialPhysicality: clubManager.aerialPhysicality,
+      },
+      [player]
+    );
+  }, [player, clubManager]);
+
+  const topWorldManagers = useMemo(
+    () => rankManagersForPlayer(player, managers, 3),
+    [player, managers]
+  );
 
   const handleLiveRefresh = async () => {
     setRefreshing(true);
@@ -165,6 +236,25 @@ export function PlayerProfileView({
                   <span className="font-mono-num font-semibold">{player.contractUntil}</span>
                 </div>
               </div>
+
+              {(player.dataSources?.length || player.injuryStatus) && (
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+                  {(player.dataSources || []).map((src) => (
+                    <span
+                      key={src}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#EBF5F4] dark:bg-[#112A2C] text-[#136F73] dark:text-[#2DD4BF] font-medium"
+                    >
+                      {src}
+                    </span>
+                  ))}
+                  {player.injuryStatus && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 font-medium">
+                      <HeartPulse className="w-3 h-3" />
+                      Riwayat Cedera: {player.injuryStatus.reason} ({player.injuryStatus.season || '2026'})
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -251,6 +341,40 @@ export function PlayerProfileView({
               </div>
             ))}
           </div>
+
+          {player.optaExtras && Object.keys(player.optaExtras).length > 0 && (
+            <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-600 dark:text-slate-300">
+              <span className="inline-flex items-center gap-1 font-semibold text-[#136F73] dark:text-[#2DD4BF]">
+                <Activity className="w-3.5 h-3.5" />
+                Metrik Opta Lanjutan:
+              </span>
+              {player.optaExtras.topSpeedKmh !== undefined && (
+                <span className="font-mono-num">
+                  Top Speed: <strong>{player.optaExtras.topSpeedKmh.toFixed(1)} km/h</strong>
+                </span>
+              )}
+              {player.optaExtras.lineBreakingPassesPer90 !== undefined && (
+                <span className="font-mono-num">
+                  Line-Breaking Pass/90: <strong>{player.optaExtras.lineBreakingPassesPer90.toFixed(2)}</strong>
+                </span>
+              )}
+              {player.optaExtras.bigChancesCreated !== undefined && (
+                <span className="font-mono-num">
+                  Big Chances Created: <strong>{player.optaExtras.bigChancesCreated}</strong>
+                </span>
+              )}
+              {player.optaExtras.ballRecoveriesPer90 !== undefined && (
+                <span className="font-mono-num">
+                  Ball Recoveries/90: <strong>{player.optaExtras.ballRecoveriesPer90.toFixed(2)}</strong>
+                </span>
+              )}
+              {player.optaExtras.defensiveActionsPer90 !== undefined && (
+                <span className="font-mono-num">
+                  Def. Actions/90: <strong>{player.optaExtras.defensiveActionsPer90.toFixed(2)}</strong>
+                </span>
+              )}
+            </div>
+          )}
         </section>
 
         <section className="lg:col-span-5 p-6 rounded-2xl border border-[#DCE8E6] dark:border-[#1B3335] bg-white dark:bg-[#0F1E20] flex flex-col justify-between">
@@ -333,6 +457,119 @@ export function PlayerProfileView({
           )}
         </section>
       </div>
+      {/* 5. Sinergi Pelatih Klub & Top 3 Pelatih Dunia */}
+      <section
+        data-testid="player-manager-synergy"
+        className="p-6 rounded-2xl border border-[#DCE8E6] dark:border-[#1B3335] bg-white dark:bg-[#0F1E20] space-y-5"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-slate-100 dark:border-slate-800">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <UserCheck className="w-4 h-4 text-[#136F73] dark:text-[#2DD4BF]" />
+              Sinergi Pelatih Klub &amp; Top 3 Pelatih Dunia ({managers.length} Profil)
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Evaluasi kecocokan profil pemain terhadap pelatih klub saat ini serta manajer dunia paling selaras.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onOpenFitEngine(player.fotmobId, clubManager?.id)}
+            className="text-xs font-semibold text-[#136F73] dark:text-[#2DD4BF] hover:underline shrink-0"
+          >
+            Buka Fit Engine Lengkap →
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          {clubManager && clubManagerFit ? (
+            <div className="lg:col-span-5 p-4 rounded-xl bg-[#EBF5F4] dark:bg-[#112A2C] border border-[#CFE4E2] dark:border-[#1D4446] flex flex-col justify-between gap-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-[#136F73] dark:text-[#2DD4BF]">
+                    Pelatih Klub Saat Ini
+                  </span>
+                  <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-50 mt-0.5">
+                    {clubManager.managerName}
+                  </h3>
+                  <div className="text-xs text-slate-600 dark:text-slate-300">
+                    {clubManager.clubName} · {clubManager.primaryFormation}
+                    {clubManager.tacticalArchetype ? ` · ${clubManager.tacticalArchetype}` : ''}
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="font-mono-num text-2xl font-bold text-[#136F73] dark:text-[#2DD4BF]">
+                    {clubManagerFit.overallScore}%
+                  </div>
+                  <div className="text-[10px] text-slate-500">System Fit</div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 pt-2 border-t border-[#CFE4E2] dark:border-[#1D4446] text-xs font-mono-num">
+                <div>
+                  <span className="text-[10px] text-slate-500 block">PPG</span>
+                  <span className="font-semibold text-slate-900 dark:text-slate-100">
+                    {(clubManager.pointsPerGame ?? 1.85).toFixed(2)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500 block">Win Rate</span>
+                  <span className="font-semibold text-slate-900 dark:text-slate-100">
+                    {(clubManager.winRatePct ?? 56).toFixed(1)}%
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500 block">Trofi</span>
+                  <span className="font-semibold text-slate-900 dark:text-slate-100">
+                    {clubManager.trophiesCount ?? 0}
+                  </span>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                {clubManager.tacticalSummary}
+              </p>
+            </div>
+          ) : (
+            <div className="lg:col-span-5 p-4 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 flex items-center justify-center text-xs text-slate-500 text-center">
+              Pelatih klub belum terpetakan langsung — bandingkan kecocokan dengan Top 3 Pelatih Dunia di samping.
+            </div>
+          )}
+
+          <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {topWorldManagers.map(({ manager, fit }, idx) => (
+              <button
+                key={manager.id}
+                type="button"
+                onClick={() => onOpenFitEngine(player.fotmobId, manager.id)}
+                className="p-4 rounded-xl border border-[#DCE8E6] dark:border-[#1B3335] bg-slate-50/70 dark:bg-slate-900/50 hover:border-[#136F73] dark:hover:border-[#2DD4BF] text-left transition-colors flex flex-col justify-between gap-2.5"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[10px] font-mono-num font-semibold text-[#136F73] dark:text-[#2DD4BF] flex items-center gap-1">
+                      <Award className="w-3 h-3" />#{idx + 1} Match Dunia
+                    </div>
+                    <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate mt-0.5">
+                      {manager.managerName}
+                    </div>
+                    <div className="text-[11px] text-slate-500 truncate">
+                      {manager.clubName} · {manager.primaryFormation}
+                    </div>
+                  </div>
+                  <div className="font-mono-num text-lg font-bold text-[#136F73] dark:text-[#2DD4BF] shrink-0">
+                    {fit.overallScore}%
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] font-mono-num text-slate-600 dark:text-slate-400 pt-2 border-t border-slate-200/70 dark:border-slate-800">
+                  <span>PPG {(manager.pointsPerGame ?? 1.8).toFixed(2)}</span>
+                  <span>Win {(manager.winRatePct ?? 54).toFixed(0)}%</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

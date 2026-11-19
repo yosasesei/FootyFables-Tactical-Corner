@@ -7,12 +7,15 @@ import type {
   SquadBalanceReport,
   TacticalFitResult,
   TacticalParameters,
+  TeamManagerProfile,
 } from '../types/footy';
 export {
+  calculateSquadManagerSynergy,
   evaluateSlotFit,
   predictMatchFromLineups,
   type EnhancedMatchPrediction,
   type SlotFitQuality,
+  type SquadManagerSynergyReport,
 } from './matchPredictor';
 
 export function clamp(val: number, min: number, max: number): number {
@@ -206,6 +209,63 @@ export function calculateTacticalFit(
     risks: risks.slice(0, 3),
     similarPlayers,
   };
+}
+
+export interface ManagerPlayerFitEntry {
+  manager: TeamManagerProfile;
+  fit: TacticalFitResult;
+}
+
+export function findClubManager(
+  clubName: string,
+  managers: TeamManagerProfile[]
+): TeamManagerProfile | undefined {
+  const cleanClub = clubName
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\bfc\b|\bcf\b|\bsc\b/g, '')
+    .trim();
+  if (!cleanClub) return undefined;
+
+  // Exact or substring match, prioritizing non-legacy entries
+  const candidates = managers.filter((m) => {
+    const mc = m.clubName
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/\bfc\b|\bcf\b|\bsc\b/g, '')
+      .trim();
+    return mc === cleanClub || mc.includes(cleanClub) || cleanClub.includes(mc);
+  });
+
+  if (candidates.length === 0) return undefined;
+  return candidates.find((c) => !c.clubName.toLowerCase().includes('legacy')) || candidates[0];
+}
+
+export function rankManagersForPlayer(
+  player: Player,
+  managers: TeamManagerProfile[],
+  limit = 5
+): ManagerPlayerFitEntry[] {
+  return managers
+    .map((manager) => ({
+      manager,
+      fit: calculateTacticalFit(
+        player,
+        {
+          pressingIntensity: manager.pressingIntensity,
+          possessionFocus: manager.possessionFocus,
+          transitionSpeed: manager.transitionSpeed,
+          buildUpStyle: manager.buildUpStyle,
+          defensiveLine: manager.defensiveLine,
+          aerialPhysicality: manager.aerialPhysicality,
+        },
+        [player]
+      ),
+    }))
+    .sort((a, b) => b.fit.overallScore - a.fit.overallScore)
+    .slice(0, limit);
 }
 
 export function analyzeSquadBalance(
@@ -460,7 +520,7 @@ export function getPlayerRecentMatches(player: Player): MatchRatingPoint[] {
   const usedOpponents = new Set<string>();
 
   const matches: MatchRatingPoint[] = [];
-  const baseDate = new Date('2025-02-22T00:00:00Z');
+  const baseDate = new Date('2026-11-18T00:00:00Z');
 
   for (let idx = 0; idx < 10; idx++) {
     // Chronological oldest -> newest (9 weeks ago .. most recent)

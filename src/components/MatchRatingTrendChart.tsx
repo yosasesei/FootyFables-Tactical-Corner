@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Activity, TrendingDown, TrendingUp } from 'lucide-react';
 import type { Player } from '../types/footy';
 import { getPlayerRecentMatches } from '../utils/analytics';
@@ -8,8 +8,19 @@ interface MatchRatingTrendChartProps {
 }
 
 export function MatchRatingTrendChart({ player }: MatchRatingTrendChartProps) {
-  const matches = useMemo(() => getPlayerRecentMatches(player), [player]);
+  const matches = useMemo(
+    () =>
+      player.recentMatches && player.recentMatches.length > 0
+        ? player.recentMatches
+        : getPlayerRecentMatches(player),
+    [player]
+  );
+  const isLiveLog = useMemo(() => matches.some((m) => m.isLiveFixture), [matches]);
   const [activeIndex, setActiveIndex] = useState<number>(Math.max(0, matches.length - 1));
+
+  useEffect(() => {
+    setActiveIndex(Math.max(0, matches.length - 1));
+  }, [player.fotmobId, matches.length]);
 
   const safeIdx = Math.min(activeIndex, Math.max(0, matches.length - 1));
   const activeMatch = matches[safeIdx];
@@ -90,9 +101,12 @@ export function MatchRatingTrendChart({ player }: MatchRatingTrendChartProps) {
       {/* Header & Active Match Inspector Strip */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
         <div>
-          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100 flex flex-wrap items-center gap-2">
             <Activity className="w-4 h-4 text-[#136F73] dark:text-[#2DD4BF]" />
-            Tren Performa 10 Pertandingan Terakhir (FotMob Rating)
+            Tren Performa {matches.length} Pertandingan Terakhir (FotMob Rating)
+            <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-[#EBF5F4] dark:bg-[#112A2C] text-[#136F73] dark:text-[#2DD4BF]">
+              {isLiveLog ? 'Live Club Fixtures' : 'Proyeksi Form'}
+            </span>
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
             Klik atau arahkan kursor ke titik pertandingan untuk membedah fluktuasi rating per laga.

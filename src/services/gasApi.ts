@@ -6,6 +6,11 @@ import {
   FALLBACK_TRANSFERS,
   FALLBACK_WORLD_MATCHES,
 } from '../data/fallbackData';
+import {
+  WORLD_MANAGERS,
+  buildDynamicManagerProfile,
+  normalizeCoachKey,
+} from '../data/worldManagers';
 import type {
   Article,
   GlobalSearchResult,
@@ -21,26 +26,48 @@ import type {
   WorldMatch,
 } from '../types/footy';
 import {
+  ensureUpToDatePlayerCareer,
+  extractTeamTransfersMap,
+  type ExtractedTeamTransferData,
+} from '../utils/careerHistory';
+import {
   applyTelemetryToPlayer,
   clearLeagueStatsCache,
   computeRadarFromStats,
   estimateMarketValueFromProfile,
+  extractOptaSeasonFromUrls,
   fetchLeaguePlayerStats,
+  getRegisteredLeagueOptaInfo,
+  registerLeagueOptaUrls,
   type LeaguePlayerTelemetry,
 } from './fotmobStats';
+import {
+  clearExternalSourcesCache,
+  extractTeamRecentMatches,
+  fetchTmScraperPlayerBundle,
+  getExternalSourcesConfig,
+  getSalimtInjuriesMap,
+  getSalimtLatestMarketValues,
+  lookupSalimtEnrichment,
+  normalizeLeagueTransfersToTicker,
+  selectCurrentMatchWindow,
+} from './externalSources';
 
 export const DEFAULT_GAS_API_URL =
   'https://script.google.com/macros/s/AKfycbyo9NgU03Twi9TuJW78LqULD6lUhaaqs_W-1gPU_GsyHjLZlgYfkp_nKSW3s_9kdCbR1w/exec';
 
 export const PLAYERS_UPDATED_EVENT = 'footyfables:players-updated';
+export const MANAGERS_UPDATED_EVENT = 'footyfables:managers-updated';
 
 const KEYS = {
   GAS_URL: 'footyfables_gas_api_url',
   ADMIN_PIN: 'footyfables_admin_pin',
-  PLAYERS_CACHE: 'footyfables_players_cache_v2',
-  LEGACY_PLAYERS_CACHE: 'footyfables_players_cache_v1',
+  PLAYERS_CACHE: 'footyfables_players_cache_v3',
+  LEGACY_PLAYERS_CACHE_V1: 'footyfables_players_cache_v1',
+  LEGACY_PLAYERS_CACHE_V2: 'footyfables_players_cache_v2',
   ARTICLES_CACHE: 'footyfables_articles_cache_v1',
-  MANAGERS_CACHE: 'footyfables_managers_cache_v1',
+  MANAGERS_CACHE: 'footyfables_managers_cache_v2',
+  LEGACY_MANAGERS_CACHE_V1: 'footyfables_managers_cache_v1',
 };
 
 export function getGasApiUrl(): string {
@@ -95,15 +122,20 @@ function isCorruptedLegacyPlayer(p: Player): boolean {
 
 export function getCachedPlayers(): Player[] {
   try {
-    // Clear legacy v1 cache that stored uncalibrated €15M/0-stat entries
-    if (localStorage.getItem(KEYS.LEGACY_PLAYERS_CACHE)) {
-      localStorage.removeItem(KEYS.LEGACY_PLAYERS_CACHE);
+    // Clear legacy v1/v2 caches that stored stale 2025 MV trends or uniform 2027-06-30 contracts
+    if (localStorage.getItem(KEYS.LEGACY_PLAYERS_CACHE_V1)) {
+      localStorage.removeItem(KEYS.LEGACY_PLAYERS_CACHE_V1);
+    }
+    if (localStorage.getItem(KEYS.LEGACY_PLAYERS_CACHE_V2)) {
+      localStorage.removeItem(KEYS.LEGACY_PLAYERS_CACHE_V2);
     }
     const raw = localStorage.getItem(KEYS.PLAYERS_CACHE);
     if (raw) {
       const parsed = JSON.parse(raw) as Player[];
       if (Array.isArray(parsed) && parsed.length > 0) {
-        const cleaned = parsed.filter((p) => p && p.fotmobId && !isCorruptedLegacyPlayer(p));
+        const cleaned = parsed
+          .filter((p) => p && p.fotmobId && !isCorruptedLegacyPlayer(p))
+          .map((p) => ensureUpToDatePlayerCareer(p));
         if (cleaned.length > 0) return cleaned;
       }
     }
@@ -159,6 +191,20 @@ export function mergePlayersIntoCache(incoming: Player[]): Player[] {
         inc.transferHistory.length >= prev.transferHistory.length
           ? inc.transferHistory
           : prev.transferHistory,
+      recentMatches:
+        inc.recentMatches && inc.recentMatches.some((m) => m.isLiveFixture)
+          ? inc.recentMatches
+          : inc.recentMatches && inc.recentMatches.length > 0
+          ? inc.recentMatches
+          : prev.recentMatches,
+      optaExtras: {
+        ...prev.optaExtras,
+        ...inc.optaExtras,
+      },
+      injuryStatus: inc.injuryStatus !== undefined ? inc.injuryStatus : prev.injuryStatus,
+      dataSources: Array.from(
+        new Set([...(prev.dataSources || []), ...(inc.dataSources || [])])
+      ),
       stats: {
         rating: inc.stats.rating > 0 ? inc.stats.rating : prev.stats.rating,
         minutes: inc.stats.minutes > 0 ? inc.stats.minutes : prev.stats.minutes,
@@ -208,12 +254,56 @@ export function saveCachedArticles(articles: Article[]): void {
   }
 }
 
+export function mergeManagersList(
+  base: TeamManagerProfile[],
+  incoming: TeamManagerProfile[]
+): TeamManagerProfile[] {
+  const byName = new Map<string, TeamManagerProfile>();
+  for (const m of base) {
+    if (!m?.managerName) continue;
+    byName.set(normalizeCoachKey(m.managerName), m);
+  }
+  for (const inc of incoming) {
+    if (!inc?.managerName) continue;
+    const key = normalizeCoachKey(inc.managerName);
+    const prev = byName.get(key);
+    if (!prev) {
+      byName.set(key, inc);
+    } else {
+      byName.set(key, {
+        ...prev,
+        ...inc,
+        id: prev.id || inc.id,
+        nationality: inc.nationality || prev.nationality,
+        age: inc.age || prev.age,
+        fotmobCoachId: inc.fotmobCoachId || prev.fotmobCoachId,
+        pointsPerGame: inc.pointsPerGame ?? prev.pointsPerGame,
+        winRatePct: inc.winRatePct ?? prev.winRatePct,
+        matchesManaged: inc.matchesManaged ?? prev.matchesManaged,
+        tacticalArchetype: prev.tacticalArchetype || inc.tacticalArchetype,
+        trophiesCount: prev.trophiesCount ?? inc.trophiesCount,
+        tacticalSummary:
+          prev.tacticalSummary && prev.tacticalSummary.length > (inc.tacticalSummary?.length || 0)
+            ? prev.tacticalSummary
+            : inc.tacticalSummary || prev.tacticalSummary,
+        syncedLive: Boolean(prev.syncedLive || inc.syncedLive),
+      });
+    }
+  }
+  return Array.from(byName.values());
+}
+
 export function getCachedManagers(): TeamManagerProfile[] {
   try {
+    if (localStorage.getItem(KEYS.LEGACY_MANAGERS_CACHE_V1)) {
+      localStorage.removeItem(KEYS.LEGACY_MANAGERS_CACHE_V1);
+    }
     const raw = localStorage.getItem(KEYS.MANAGERS_CACHE);
     if (raw) {
       const parsed = JSON.parse(raw) as TeamManagerProfile[];
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return mergeManagersList(WORLD_MANAGERS, parsed);
+      }
     }
   } catch {
     // fallback
@@ -224,9 +314,18 @@ export function getCachedManagers(): TeamManagerProfile[] {
 export function saveCachedManagers(managers: TeamManagerProfile[]): void {
   try {
     localStorage.setItem(KEYS.MANAGERS_CACHE, JSON.stringify(managers));
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent(MANAGERS_UPDATED_EVENT, { detail: managers }));
+    }
   } catch {
     // ignore
   }
+}
+
+export function mergeManagersIntoCache(incoming: TeamManagerProfile[]): TeamManagerProfile[] {
+  const merged = mergeManagersList(getCachedManagers(), incoming);
+  saveCachedManagers(merged);
+  return merged;
 }
 
 function pickPositiveNumber(...values: unknown[]): number {
@@ -358,6 +457,7 @@ function normalizePreferredFoot(val: unknown): PreferredFoot {
 export interface NormalizePlayerOptions {
   existing?: Player;
   telemetry?: LeaguePlayerTelemetry;
+  teamTransferInfo?: ExtractedTeamTransferData;
   isSearchPreview?: boolean;
 }
 
@@ -497,19 +597,13 @@ export function normalizeGasPlayer(
   const marketValueHistory: MarketValuePoint[] =
     Array.isArray(marketHistoryRaw) && marketHistoryRaw.length > 0
       ? marketHistoryRaw.map((m) => ({
-          date: String(m.date || '').slice(0, 7) || '2025-01',
+          date: String(m.date || '').slice(0, 7) || '2026-06',
           valueEur: Number(m.value_eur ?? m.valueEur ?? 0) || marketValueEur,
           club: String(m.club_at_date || m.club || clubName),
         }))
       : existing?.marketValueHistory && existing.marketValueHistory.length > 1
       ? existing.marketValueHistory
-      : fallbackMatch?.marketValueHistory || [
-          {
-            date: '2025-01',
-            valueEur: marketValueEur,
-            club: clubName,
-          },
-        ];
+      : fallbackMatch?.marketValueHistory || [];
 
   const transferHistory: TransferRecord[] =
     Array.isArray(transferHistoryRaw) && transferHistoryRaw.length > 0
@@ -551,7 +645,7 @@ export function normalizeGasPlayer(
     clubId: String(raw.club_id || raw.clubId || raw.team_id || existing?.clubId || fallbackMatch?.clubId || ''),
     league: String(raw.league || existing?.league || fallbackMatch?.league || 'Top Flight'),
     contractUntil: String(
-      raw.contract_until || existing?.contractUntil || fallbackMatch?.contractUntil || '2027-06-30'
+      raw.contract_until || raw.contractUntil || existing?.contractUntil || fallbackMatch?.contractUntil || ''
     ),
     marketValueEur,
     marketValueChangePct: Number(
@@ -570,7 +664,7 @@ export function normalizeGasPlayer(
       raw.highest_mv_date ||
         existing?.highestMarketValueDate ||
         fallbackMatch?.highestMarketValueDate ||
-        '2025-01'
+        '2026-11'
     ),
     syncedToSheets: Boolean(raw.is_cached ?? raw.last_synced ?? true),
     stats,
@@ -582,7 +676,8 @@ export function normalizeGasPlayer(
       : existing?.recentMatches || fallbackMatch?.recentMatches,
   };
 
-  return telemetry ? applyTelemetryToPlayer(basePlayer, telemetry) : basePlayer;
+  const withTelemetry = telemetry ? applyTelemetryToPlayer(basePlayer, telemetry) : basePlayer;
+  return ensureUpToDatePlayerCareer(withTelemetry, options?.teamTransferInfo);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -710,10 +805,30 @@ export async function searchGlobal(query: string): Promise<GlobalSearchResult> {
   };
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const leaguePayloadCache = new Map<string, any>();
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function ingestLeagueTelemetryAndCache(leagueId: string, remote: any): void {
+  if (!remote?.data) return;
+  leaguePayloadCache.set(leagueId, remote);
+  const playerStatRows = remote?.data?.stats?.players;
+  if (Array.isArray(playerStatRows) && playerStatRows.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const urls = playerStatRows.map((p: any) => String(p?.fetchAllUrl || '')).filter(Boolean);
+    const extracted = extractOptaSeasonFromUrls(urls);
+    if (extracted?.urls.length) {
+      registerLeagueOptaUrls(leagueId, extracted.seasonId, extracted.urls);
+    }
+  }
+}
+
 export async function getLeague(leagueId: string): Promise<LeagueInfo> {
   const remote = await gasGet('getLeague', { id: leagueId });
   const fallbackLeague =
     FALLBACK_LEAGUES.find((l) => l.id === leagueId) || FALLBACK_LEAGUES[0];
+
+  ingestLeagueTelemetryAndCache(leagueId, remote);
 
   // Parse FotMob league table shape returned by GAS proxy
   const rawTable =
@@ -751,6 +866,81 @@ export async function getLeague(leagueId: string): Promise<LeagueInfo> {
   return fallbackLeague;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let initialDataBundlePromise: Promise<{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  marketByPid: Map<string, any[]>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  transfersByPid: Map<string, any[]>;
+  managers: TeamManagerProfile[];
+} | null> | null = null;
+
+function extractPidFromSheetKey(val: unknown): string {
+  const s = String(val || '').trim();
+  return s.replace(/^PLR-/i, '');
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizeSheetManagerRow(raw: any): TeamManagerProfile | null {
+  const name = String(raw?.manager_name || raw?.managerName || '').trim();
+  const clubName = String(raw?.team_name || raw?.clubName || '').trim();
+  if (!name) return null;
+  return buildDynamicManagerProfile({
+    coachId: raw?.team_id || raw?.id,
+    name,
+    clubName: clubName || 'Club',
+    league: String(raw?.league || 'Top Flight'),
+    formation: String(raw?.primary_formation || raw?.primaryFormation || '4-2-3-1'),
+  });
+}
+
+async function fetchInitialDataBundle(force = false) {
+  if (force || !initialDataBundlePromise) {
+    initialDataBundlePromise = gasGet('getInitialData')
+      .then((res) => {
+        if (!res) return null;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const marketByPid = new Map<string, any[]>();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const transfersByPid = new Map<string, any[]>();
+
+        if (Array.isArray(res.marketHistory)) {
+          for (const row of res.marketHistory) {
+            const pid = extractPidFromSheetKey(row?.player_id || row?.fotmob_id);
+            if (!pid) continue;
+            const list = marketByPid.get(pid) || [];
+            list.push(row);
+            marketByPid.set(pid, list);
+          }
+        }
+        if (Array.isArray(res.transferHistory)) {
+          for (const row of res.transferHistory) {
+            const pid = extractPidFromSheetKey(row?.player_id || row?.fotmob_id);
+            if (!pid) continue;
+            const list = transfersByPid.get(pid) || [];
+            list.push(row);
+            transfersByPid.set(pid, list);
+          }
+        }
+
+        const managers: TeamManagerProfile[] = [];
+        if (Array.isArray(res.teams)) {
+          for (const t of res.teams) {
+            const m = normalizeSheetManagerRow(t);
+            if (m) managers.push(m);
+          }
+        }
+        if (managers.length > 0) {
+          mergeManagersIntoCache(managers);
+        }
+
+        return { marketByPid, transfersByPid, managers };
+      })
+      .catch(() => null);
+  }
+  return initialDataBundlePromise;
+}
+
 export async function getTeam(
   teamId: string,
   options?: { forceRefresh?: boolean }
@@ -761,7 +951,10 @@ export async function getTeam(
     queryParams._t = String(Date.now());
   }
 
-  const remote = await gasGet('getTeam', queryParams);
+  const [remote, initialBundle] = await Promise.all([
+    gasGet('getTeam', queryParams),
+    fetchInitialDataBundle(false),
+  ]);
   const allPlayers = getCachedPlayers();
   const cachedById = new Map<string, Player>(allPlayers.map((p) => [p.fotmobId, p]));
 
@@ -769,60 +962,138 @@ export async function getTeam(
   const squadGroups = remote?.data?.squad?.squad || remote?.data?.squad;
   if (remote?.data?.details && Array.isArray(squadGroups)) {
     let coachName = 'First Team Manager';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let coachMeta: any = null;
     const membersList: Player[] = [];
     const clubName = String(remote.data.details.name || 'Club');
 
-    // Extract live league/season telemetry URLs provided in FotMob team payload
-    const primaryLeagueId = remote?.data?.stats?.primaryLeagueId || remote?.data?.details?.primaryLeagueId;
-    const primarySeasonId = remote?.data?.stats?.primarySeasonId;
+    // Extract live league/season telemetry URLs provided in FotMob team payload (or registered league Opta URLs)
+    const primaryLeagueId = String(
+      remote?.data?.stats?.primaryLeagueId ||
+        remote?.data?.details?.primaryLeagueId ||
+        remote?.data?.fixtures?.primaryTournamentId ||
+        ''
+    );
+    const registeredOpta = primaryLeagueId
+      ? getRegisteredLeagueOptaInfo(primaryLeagueId)
+      : undefined;
     const customUrls: string[] = Array.isArray(remote?.data?.stats?.players)
       ? remote.data.stats.players
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           .map((s: any) => String(s?.fetchAllUrl || ''))
           .filter(Boolean)
-      : [];
+      : registeredOpta?.urls || [];
+    const primarySeasonId = String(
+      remote?.data?.stats?.primarySeasonId ||
+        registeredOpta?.seasonId ||
+        extractOptaSeasonFromUrls(customUrls)?.seasonId ||
+        ''
+    );
 
-    const telemetryMap =
-      primaryLeagueId && primarySeasonId
-        ? await fetchLeaguePlayerStats(primaryLeagueId, primarySeasonId, customUrls).catch(
+    const sourcesCfg = getExternalSourcesConfig();
+    const [telemetryMap, salimtMvMap, salimtInjuryMap] = await Promise.all([
+      sourcesCfg.enableOptaFeed && primaryLeagueId && primarySeasonId
+        ? fetchLeaguePlayerStats(primaryLeagueId, primarySeasonId, customUrls).catch(
             () => new Map<string, LeaguePlayerTelemetry>()
           )
-        : new Map<string, LeaguePlayerTelemetry>();
+        : Promise.resolve(new Map<string, LeaguePlayerTelemetry>()),
+      sourcesCfg.enableSalimtDataset
+        ? getSalimtLatestMarketValues().catch(() => new Map())
+        : Promise.resolve(new Map()),
+      sourcesCfg.enableSalimtDataset
+        ? getSalimtInjuriesMap().catch(() => new Map())
+        : Promise.resolve(new Map()),
+    ]);
 
-    const leagueMeta = FALLBACK_LEAGUES.find((lg) =>
-      lg.id === String(primaryLeagueId || '') ||
-      lg.clubs.some((c) => c.id === String(teamId))
+    const teamTransfersMap = extractTeamTransfersMap(remote.data);
+
+    const leagueMeta = FALLBACK_LEAGUES.find(
+      (lg) =>
+        lg.id === String(primaryLeagueId || '') ||
+        lg.clubs.some((c) => c.id === String(teamId))
     );
+    const resolvedLeagueName = leagueMeta?.name || remote.data.details.primaryLeagueName || 'Top Flight';
 
     for (const group of squadGroups) {
       if (group.title === 'coach' && Array.isArray(group.members) && group.members[0]) {
-        coachName = String(group.members[0].name || coachName);
+        coachMeta = group.members[0];
+        coachName = String(coachMeta.name || coachName);
         continue;
       }
       if (Array.isArray(group.members)) {
         for (const m of group.members) {
           const memberId = String(m.id || '');
+          const prevCached = cachedById.get(memberId);
+          const tmId = String(m.tmId || prevCached?.tmId || '');
+          const salimtMv = tmId ? salimtMvMap.get(tmId) : undefined;
+          const salimtInj = tmId ? salimtInjuryMap.get(tmId) : undefined;
+
           const normalized = normalizeGasPlayer(
             {
               ...m,
               fotmob_id: memberId,
+              tm_id: tmId,
               club: clubName,
               club_id: String(remote.data.details.id || teamId),
-              league: leagueMeta?.name || remote.data.details.primaryLeagueName || undefined,
+              league: resolvedLeagueName,
               position: m.positionIdsDesc || m.role?.fallback || 'CM',
               rating: m.rating,
-              transferValue: m.transferValue,
+              transferValue: m.transferValue || salimtMv?.valueEur,
             },
-            undefined,
-            undefined,
+            initialBundle?.marketByPid.get(memberId),
+            initialBundle?.transfersByPid.get(memberId),
             {
-              existing: cachedById.get(memberId),
+              existing: prevCached,
               telemetry: telemetryMap.get(memberId),
+              teamTransferInfo: teamTransfersMap.get(memberId),
             }
           );
-          membersList.push(normalized);
+
+          const recentMatches = extractTeamRecentMatches(remote.data, normalized, 10);
+          const sources = Array.from(
+            new Set([
+              ...(normalized.dataSources || []),
+              'FotMob Squad Live',
+              ...(salimtMv || salimtInj ? ['salimt/football-datasets'] : []),
+            ])
+          );
+
+          membersList.push({
+            ...normalized,
+            recentMatches:
+              recentMatches.length > 0 ? recentMatches : normalized.recentMatches,
+            injuryStatus: salimtInj
+              ? {
+                  reason: salimtInj.reason,
+                  season: salimtInj.season,
+                  fromDate: salimtInj.fromDate,
+                  endDate: salimtInj.endDate,
+                  gamesMissed: salimtInj.gamesMissed,
+                  source: 'salimt/football-datasets (2026-09)',
+                }
+              : normalized.injuryStatus,
+            dataSources: sources,
+          });
         }
       }
+    }
+
+    // Extract & cache live coach profile + FotMob coachHistory telemetry
+    if (coachMeta?.name) {
+      const coachHistory =
+        remote?.data?.overview?.coachHistory ||
+        remote?.data?.history?.coachHistory ||
+        [];
+      const liveCoachProfile = buildDynamicManagerProfile({
+        coachId: coachMeta.id,
+        name: coachName,
+        clubName,
+        league: resolvedLeagueName,
+        age: Number(coachMeta.age || 0),
+        nationality: coachMeta.cname ? String(coachMeta.cname) : undefined,
+        coachHistory: Array.isArray(coachHistory) ? coachHistory : [],
+      });
+      mergeManagersIntoCache([liveCoachProfile]);
     }
 
     if (membersList.length > 0) {
@@ -865,7 +1136,79 @@ function needsTelemetryHydration(player: Player | undefined): boolean {
   if (!player) return true;
   if (player.marketValueEur <= 0) return true;
   if (player.stats.xG === 0 && player.stats.xA === 0 && player.stats.passAccuracy === 0) return true;
+  if (!player.marketValueHistory.some((m) => m.date >= '2026-01')) return true;
+  if (player.transferHistory.length === 0) return true;
+  if (!player.recentMatches || !player.recentMatches.some((m) => m.isLiveFixture)) return true;
+  if (!player.dataSources?.includes('Opta/FotMob Live')) return true;
   return false;
+}
+
+async function applyMultiSourceEnrichmentToPlayer(
+  basePlayer: Player,
+  params: { tmId?: string; name?: string }
+): Promise<Player> {
+  const sourcesCfg = getExternalSourcesConfig();
+  const [tmScraperBundle, salimtInfo] = await Promise.all([
+    sourcesCfg.tmScraperUrl
+      ? fetchTmScraperPlayerBundle({
+          tmId: params.tmId || basePlayer.tmId,
+          playerName: params.name || basePlayer.name,
+        }).catch(() => null)
+      : Promise.resolve(null),
+    sourcesCfg.enableSalimtDataset
+      ? lookupSalimtEnrichment({
+          tmId: params.tmId || basePlayer.tmId,
+          name: params.name || basePlayer.name,
+          includeProfiles: true,
+        }).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+
+  let next = { ...basePlayer };
+  const sources = new Set<string>(basePlayer.dataSources || []);
+
+  if (salimtInfo) {
+    sources.add('salimt/football-datasets');
+    next = {
+      ...next,
+      tmId: next.tmId || salimtInfo.tmId || '',
+      contractUntil:
+        salimtInfo.contractUntil && salimtInfo.contractUntil > '2026-06-30'
+          ? salimtInfo.contractUntil
+          : next.contractUntil,
+      heightCm: salimtInfo.heightCm && salimtInfo.heightCm > 140 ? salimtInfo.heightCm : next.heightCm,
+      preferredFoot: salimtInfo.preferredFoot || next.preferredFoot,
+      marketValueEur:
+        next.marketValueEur <= 0 && salimtInfo.marketValueEur
+          ? salimtInfo.marketValueEur
+          : next.marketValueEur,
+      injuryStatus: salimtInfo.injuryStatus ?? next.injuryStatus,
+    };
+  }
+
+  if (tmScraperBundle) {
+    sources.add('Transfermarkt Scraper API');
+    const p = tmScraperBundle.profile;
+    next = {
+      ...next,
+      tmId: tmScraperBundle.tmId || next.tmId,
+      contractUntil: p?.contractUntil || next.contractUntil,
+      heightCm: p?.heightCm || next.heightCm,
+      preferredFoot: p?.foot || next.preferredFoot,
+      marketValueEur: p?.marketValueEur && p.marketValueEur > 0 ? p.marketValueEur : next.marketValueEur,
+      marketValueHistory:
+        tmScraperBundle.marketHistory.length > 0
+          ? [...next.marketValueHistory, ...tmScraperBundle.marketHistory]
+          : next.marketValueHistory,
+      transferHistory:
+        tmScraperBundle.transfers.length > 0
+          ? [...tmScraperBundle.transfers, ...next.transferHistory]
+          : next.transferHistory,
+    };
+  }
+
+  next.dataSources = Array.from(sources);
+  return ensureUpToDatePlayerCareer(next);
 }
 
 export async function getPlayer(params: {
@@ -895,7 +1238,10 @@ export async function getPlayer(params: {
     queryParams._t = String(Date.now());
   }
 
-  const remote = await gasGet('getPlayer', queryParams);
+  const [remote, initialBundle] = await Promise.all([
+    gasGet('getPlayer', queryParams),
+    fetchInitialDataBundle(false),
+  ]);
 
   // Guard against GAS sheet row ID collisions (e.g. a different player cached under another player's fotmobId)
   const rawRemotePlayer =
@@ -909,23 +1255,38 @@ export async function getPlayer(params: {
       !rawRemotePlayer.name ||
       namesRoughlyMatch(params.name, String(rawRemotePlayer.name)));
 
+  const initialMvHistory = initialBundle?.marketByPid.get(params.fotmobId);
+  const initialTrHistory = initialBundle?.transfersByPid.get(params.fotmobId);
+
   let candidate: Player | null = null;
   if (rawRemotePlayer && remoteNameValid) {
+    const remoteMv =
+      Array.isArray(remote?.marketHistory) && remote.marketHistory.length > 0
+        ? remote.marketHistory
+        : initialMvHistory;
+    const remoteTr =
+      Array.isArray(remote?.transferHistory) && remote.transferHistory.length > 0
+        ? remote.transferHistory
+        : initialTrHistory;
+
     candidate = normalizeGasPlayer(
       {
         ...rawRemotePlayer,
         fotmob_id: params.fotmobId || rawRemotePlayer.fotmob_id,
         club_id: params.clubId || rawRemotePlayer.club_id,
       },
-      remote?.marketHistory,
-      remote?.transferHistory,
+      remoteMv,
+      remoteTr,
       { existing }
     );
+    candidate.dataSources = Array.from(
+      new Set([...(candidate.dataSources || []), 'Google Sheets Proxy'])
+    );
   } else if (existing) {
-    candidate = existing;
+    candidate = ensureUpToDatePlayerCareer(existing);
   }
 
-  // Resolve clubId for full live FotMob squad + league stats hydration
+  // Resolve clubId for full live FotMob/Opta squad + league stats hydration
   let targetClubId = params.clubId || candidate?.clubId || existing?.clubId || '';
   if (!targetClubId && (params.name || candidate?.name)) {
     const lookupName = params.name || candidate!.name;
@@ -936,7 +1297,7 @@ export async function getPlayer(params: {
     if (matched?.clubId) targetClubId = matched.clubId;
   }
 
-  // Pull live club squad + CORS-open data.fotmob.com league stats whenever requested or sparse
+  // Pull live club squad + CORS-open data.fotmob.com Opta stats + live fixtures whenever sparse or forced
   if (targetClubId && (params.forceRefresh || needsTelemetryHydration(candidate || undefined))) {
     const teamBundle = await getTeam(targetClubId, { forceRefresh: params.forceRefresh });
     if (teamBundle) {
@@ -947,126 +1308,237 @@ export async function getPlayer(params: {
           : undefined);
 
       if (liveMember) {
-        const mergedPlayer: Player = candidate
+        const baseMerged = candidate
           ? {
               ...candidate,
               ...liveMember,
               fotmobId: liveMember.fotmobId || candidate.fotmobId,
               tmId: candidate.tmId || liveMember.tmId,
+              contractUntil: liveMember.contractUntil || candidate.contractUntil,
               marketValueEur:
                 liveMember.marketValueEur > 0 ? liveMember.marketValueEur : candidate.marketValueEur,
               marketValueHistory:
-                candidate.marketValueHistory.length > 1
-                  ? candidate.marketValueHistory
-                  : liveMember.marketValueHistory,
+                liveMember.marketValueHistory.length >= candidate.marketValueHistory.length
+                  ? liveMember.marketValueHistory
+                  : candidate.marketValueHistory,
               transferHistory:
-                candidate.transferHistory.length > 0
-                  ? candidate.transferHistory
-                  : liveMember.transferHistory,
+                liveMember.transferHistory.length >= candidate.transferHistory.length
+                  ? liveMember.transferHistory
+                  : candidate.transferHistory,
+              recentMatches:
+                liveMember.recentMatches && liveMember.recentMatches.length > 0
+                  ? liveMember.recentMatches
+                  : candidate.recentMatches,
+              dataSources: Array.from(
+                new Set([...(candidate.dataSources || []), ...(liveMember.dataSources || [])])
+              ),
               syncedToSheets: true,
             }
           : { ...liveMember, syncedToSheets: true };
 
-        mergePlayersIntoCache([mergedPlayer]);
-        return mergedPlayer;
+        const enriched = await applyMultiSourceEnrichmentToPlayer(baseMerged, {
+          tmId: params.tmId || baseMerged.tmId,
+          name: params.name || baseMerged.name,
+        });
+        mergePlayersIntoCache([enriched]);
+        return enriched;
       }
     }
   }
 
   if (candidate) {
-    const synced = { ...candidate, syncedToSheets: true };
-    mergePlayersIntoCache([synced]);
-    return synced;
+    const enriched = await applyMultiSourceEnrichmentToPlayer(
+      { ...candidate, syncedToSheets: true },
+      { tmId: params.tmId || candidate.tmId, name: params.name || candidate.name }
+    );
+    mergePlayersIntoCache([enriched]);
+    return enriched;
   }
 
   return null;
 }
 
+const MAJOR_TRANSFER_LEAGUE_IDS = ['47', '87', '54', '55', '53'];
+
 export async function getTransfers(): Promise<TransferTickerItem[]> {
-  const remote = await gasGet('getTransfers');
-  const rawTransfers = remote?.data?.transfers || remote?.transfers;
-  if (Array.isArray(rawTransfers) && rawTransfers.length > 0) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return rawTransfers.slice(0, 25).map((t: any, idx: number) => {
-      const feeText = t.fee?.feeText || (t.onLoan ? 'Loan' : 'Undisclosed');
-      const amt = t.amountEuroEstimated;
-      const feeLabel = amt
-        ? `€${(Number(amt) / 1_000_000).toFixed(1)}M`
-        : String(feeText);
-      const dateStr = t.transferDate ? String(t.transferDate).slice(0, 10) : 'Recent';
-      return {
-        id: `live-tr-${t.playerId || idx}`,
-        playerFotmobId: String(t.playerId || ''),
-        playerName: String(t.name || 'Player'),
-        position: String(t.position?.label || 'CM'),
-        age: Number(t.age || 24),
-        fromClub: String(t.fromClub || 'Previous Club'),
-        toClub: String(t.toClub || 'Destination'),
-        feeLabel,
-        status: t.contractExtension || t.transferType?.text ? 'Confirmed' : 'Rumor',
-        reliability: 'FotMob Live',
-        updatedAt: dateStr,
-      };
-    });
+  const [globalRemote, ...leagueResponses] = await Promise.allSettled([
+    gasGet('getTransfers'),
+    ...MAJOR_TRANSFER_LEAGUE_IDS.map(async (lid) => {
+      const cached = leaguePayloadCache.get(lid);
+      if (cached) return { lid, res: cached };
+      const res = await gasGet('getLeague', { id: lid });
+      if (res) ingestLeagueTelemetryAndCache(lid, res);
+      return { lid, res };
+    }),
+  ]);
+
+  const combined: TransferTickerItem[] = [];
+
+  // 1. Live global transfer ticker
+  if (globalRemote.status === 'fulfilled' && globalRemote.value) {
+    const rawTransfers = globalRemote.value?.data?.transfers || globalRemote.value?.transfers;
+    if (Array.isArray(rawTransfers)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const [idx, t] of rawTransfers.slice(0, 25).entries() as IterableIterator<[number, any]>) {
+        const feeText = t.fee?.feeText || (t.onLoan ? 'Loan' : 'Undisclosed');
+        const amt = t.amountEuroEstimated;
+        const feeLabel = amt
+          ? `€${(Number(amt) / 1_000_000).toFixed(1)}M`
+          : String(feeText);
+        const dateStr = t.transferDate ? String(t.transferDate).slice(0, 10) : '2026-11';
+        combined.push({
+          id: `live-tr-${t.playerId || idx}-${dateStr}`,
+          playerFotmobId: String(t.playerId || ''),
+          playerName: String(t.name || 'Player'),
+          position: String(t.position?.label || 'CM'),
+          age: Number(t.age || 24),
+          fromClub: String(t.fromClub || 'Previous Club'),
+          toClub: String(t.toClub || 'Destination'),
+          feeLabel,
+          status: t.contractExtension || t.transferType?.text ? 'Confirmed' : 'Rumor',
+          reliability: 'FotMob Global Live',
+          updatedAt: dateStr,
+          clubId: String(t.toClubId || t.fromClubId || ''),
+          source: 'FotMob Live',
+        });
+      }
+    }
   }
+
+  // 2. Major 5 European Leagues official transfers from live league feeds
+  for (const lr of leagueResponses) {
+    if (lr.status !== 'fulfilled' || !lr.value?.res?.data) continue;
+    const { lid, res } = lr.value;
+    const lgName =
+      String(res.data?.details?.name || '') ||
+      FALLBACK_LEAGUES.find((l) => l.id === lid)?.name ||
+      'Major League';
+    const rawLeagueTransfers = res.data?.transfers?.data;
+    if (Array.isArray(rawLeagueTransfers)) {
+      combined.push(...normalizeLeagueTransfersToTicker(rawLeagueTransfers.slice(0, 12), lgName));
+    }
+  }
+
+  if (combined.length > 0) {
+    const deduped = new Map<string, TransferTickerItem>();
+    for (const item of combined) {
+      const key = `${item.playerName.toLowerCase()}|${item.toClub.toLowerCase()}`;
+      if (!deduped.has(key)) {
+        deduped.set(key, item);
+      }
+    }
+    return Array.from(deduped.values())
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, 45);
+  }
+
   return FALLBACK_TRANSFERS;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapLeaguePayloadToWorldMatches(leagueId: string, remote: any, limit: number): WorldMatch[] {
+  const rawMatches =
+    (Array.isArray(remote?.data?.fixtures?.allMatches) && remote.data.fixtures.allMatches) ||
+    (Array.isArray(remote?.data?.overview?.leagueOverviewMatches) &&
+      remote.data.overview.leagueOverviewMatches) ||
+    (Array.isArray(remote?.data?.matches?.allMatches) && remote.data.matches.allMatches) ||
+    [];
+
+  if (rawMatches.length === 0) return [];
+
+  const leagueMeta = FALLBACK_LEAGUES.find((l) => l.id === leagueId);
+  const windowed = selectCurrentMatchWindow(rawMatches, limit);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return windowed.map((m: any, idx: number) => {
+    const homeName = String(m.home?.name || m.home?.shortName || 'Home Club');
+    const awayName = String(m.away?.name || m.away?.shortName || 'Away Club');
+    const finished = Boolean(m.status?.finished);
+    const started = Boolean(m.status?.started);
+    const status: WorldMatch['status'] = finished
+      ? 'Finished'
+      : started
+      ? 'Live'
+      : 'Upcoming';
+
+    const homeScore = m.home?.score;
+    const awayScore = m.away?.score;
+    const fallbackScore =
+      finished && homeScore !== undefined && awayScore !== undefined
+        ? `${homeScore} - ${awayScore}`
+        : undefined;
+
+    return {
+      id: `live-match-${leagueId}-${m.id || idx}`,
+      leagueId,
+      leagueName: String(remote?.data?.details?.name || leagueMeta?.name || 'League'),
+      country: String(remote?.data?.details?.country || leagueMeta?.country || 'World'),
+      round: m.roundName ? `Matchday ${m.roundName}` : 'Season Fixture',
+      kickoffIso: String(m.status?.utcTime || new Date().toISOString()),
+      kickoffDisplay: finished
+        ? `FT · ${String(m.status?.utcTime || '').slice(5, 10)}`
+        : started
+        ? String(m.status?.liveTime?.short || 'Live')
+        : String(m.status?.utcTime || '').slice(5, 16).replace('T', ' '),
+      status,
+      scoreDisplay: m.status?.scoreStr ? String(m.status.scoreStr) : fallbackScore,
+      venue: String(m.venue?.name || 'Match Stadium'),
+      homeClubId: String(m.home?.id || ''),
+      homeClubName: homeName,
+      homeShortName: String(m.home?.shortName || homeName).slice(0, 3).toUpperCase(),
+      homeFormation: '4-3-3-holding',
+      awayClubId: String(m.away?.id || ''),
+      awayClubName: awayName,
+      awayShortName: String(m.away?.shortName || awayName).slice(0, 3).toUpperCase(),
+      awayFormation: '4-2-3-1',
+    };
+  });
+}
+
+const WORLD_MATCH_LEAGUE_IDS = ['47', '87', '54', '55', '53', '42'];
+
 export async function getWorldMatches(leagueId?: string): Promise<WorldMatch[]> {
   if (leagueId && leagueId !== 'all') {
-    const remote = await gasGet('getLeague', { id: leagueId });
-    const rawMatches =
-      remote?.data?.fixtures?.allMatches ||
-      remote?.data?.overview?.leagueOverviewMatches ||
-      remote?.data?.matches?.allMatches;
-
-    const leagueMeta = FALLBACK_LEAGUES.find((l) => l.id === leagueId);
-
-    if (Array.isArray(rawMatches) && rawMatches.length > 0) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mappedLive: WorldMatch[] = rawMatches.slice(0, 12).map((m: any, idx: number) => {
-        const homeName = String(m.home?.name || m.home?.shortName || 'Home Club');
-        const awayName = String(m.away?.name || m.away?.shortName || 'Away Club');
-        const finished = Boolean(m.status?.finished);
-        const started = Boolean(m.status?.started);
-        const status: WorldMatch['status'] = finished
-          ? 'Finished'
-          : started
-          ? 'Live'
-          : 'Upcoming';
-
-        return {
-          id: `live-match-${leagueId}-${m.id || idx}`,
-          leagueId,
-          leagueName: String(remote?.data?.details?.name || leagueMeta?.name || 'League'),
-          country: String(remote?.data?.details?.country || leagueMeta?.country || 'World'),
-          round: m.roundName ? `Matchday ${m.roundName}` : 'Season Fixture',
-          kickoffIso: String(m.status?.utcTime || new Date().toISOString()),
-          kickoffDisplay: finished
-            ? 'FT'
-            : started
-            ? String(m.status?.liveTime?.short || 'Live')
-            : String(m.status?.utcTime || '').slice(5, 16).replace('T', ' '),
-          status,
-          scoreDisplay: m.status?.scoreStr ? String(m.status.scoreStr) : undefined,
-          venue: String(m.venue?.name || 'Match Stadium'),
-          homeClubId: String(m.home?.id || ''),
-          homeClubName: homeName,
-          homeShortName: String(m.home?.shortName || homeName).slice(0, 3).toUpperCase(),
-          homeFormation: '4-3-3-holding',
-          awayClubId: String(m.away?.id || ''),
-          awayClubName: awayName,
-          awayShortName: String(m.away?.shortName || awayName).slice(0, 3).toUpperCase(),
-          awayFormation: '4-2-3-1',
-        };
-      });
-
-      if (mappedLive.length > 0) {
-        return mappedLive;
-      }
-    }
-
+    const cached = leaguePayloadCache.get(leagueId);
+    const remote = cached || (await gasGet('getLeague', { id: leagueId }));
+    if (remote) ingestLeagueTelemetryAndCache(leagueId, remote);
+    const mapped = mapLeaguePayloadToWorldMatches(leagueId, remote, 15);
+    if (mapped.length > 0) return mapped;
     return FALLBACK_WORLD_MATCHES.filter((m) => m.leagueId === leagueId);
+  }
+
+  // Live multi-league aggregation across top world competitions
+  const results = await Promise.allSettled(
+    WORLD_MATCH_LEAGUE_IDS.map(async (lid) => {
+      const cached = leaguePayloadCache.get(lid);
+      const remote = cached || (await gasGet('getLeague', { id: lid }));
+      if (remote) ingestLeagueTelemetryAndCache(lid, remote);
+      return mapLeaguePayloadToWorldMatches(lid, remote, 4);
+    })
+  );
+
+  const liveAll: WorldMatch[] = [];
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value.length > 0) {
+      liveAll.push(...r.value);
+    }
+  }
+
+  if (liveAll.length > 0) {
+    const statusOrder: Record<WorldMatch['status'], number> = {
+      Live: 0,
+      Upcoming: 1,
+      Finished: 2,
+    };
+    return liveAll.sort((a, b) => {
+      if (statusOrder[a.status] !== statusOrder[b.status]) {
+        return statusOrder[a.status] - statusOrder[b.status];
+      }
+      if (a.status === 'Finished') {
+        return b.kickoffIso.localeCompare(a.kickoffIso);
+      }
+      return a.kickoffIso.localeCompare(b.kickoffIso);
+    });
   }
 
   return FALLBACK_WORLD_MATCHES;
@@ -1100,12 +1572,17 @@ export async function saveArticle(
 }
 
 export async function fetchManagers(): Promise<TeamManagerProfile[]> {
-  const remote = await gasGet<TeamManagerProfile[]>('getManagers');
-  if (remote && Array.isArray(remote) && remote.length > 0) {
-    saveCachedManagers(remote);
-    return remote;
-  }
-  return getCachedManagers();
+  const [remote, initialBundle] = await Promise.all([
+    gasGet<TeamManagerProfile[]>('getManagers'),
+    fetchInitialDataBundle(false),
+  ]);
+  const incoming: TeamManagerProfile[] = [
+    ...(Array.isArray(remote) ? remote : []),
+    ...(initialBundle?.managers || []),
+  ];
+  const merged = mergeManagersList(getCachedManagers(), incoming);
+  saveCachedManagers(merged);
+  return merged;
 }
 
 export async function saveManager(
@@ -1133,6 +1610,9 @@ export async function forceRefreshPlayerCache(): Promise<{
   syncedToSheets: boolean;
 }> {
   clearLeagueStatsCache();
+  clearExternalSourcesCache();
+  leaguePayloadCache.clear();
+
   const cached = getCachedPlayers();
   const dynamicClubIds = Array.from(
     new Set([
@@ -1141,8 +1621,14 @@ export async function forceRefreshPlayerCache(): Promise<{
     ])
   ).slice(0, 10);
 
-  const [gasRes, ...clubResults] = await Promise.allSettled([
+  mergeManagersIntoCache(WORLD_MANAGERS);
+
+  // Pre-warm top league Opta season URLs + live transfers/fixtures before hydrating clubs
+  await Promise.allSettled(['47', '87', '54', '55', '53'].map((lid) => getLeague(lid)));
+
+  const [gasRes, , ...clubResults] = await Promise.allSettled([
     gasPost<{ refreshedCount?: number; status?: string }>('refreshCache', { force: true }),
+    fetchInitialDataBundle(true),
     ...dynamicClubIds.map((clubId) => getTeam(clubId, { forceRefresh: true })),
   ]);
 

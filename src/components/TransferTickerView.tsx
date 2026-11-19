@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, RefreshCw, TrendingUp } from 'lucide-react';
-import { getTransfers } from '../services/gasApi';
+import { ArrowRight, Loader2, RefreshCw, TrendingUp } from 'lucide-react';
+import { getPlayer, getTransfers } from '../services/gasApi';
 import type { Player, TransferTickerItem } from '../types/footy';
 import { PlayerAvatar } from './PlayerAvatar';
 
@@ -12,7 +12,9 @@ interface TransferTickerViewProps {
 export function TransferTickerView({ players, onOpenPlayer }: TransferTickerViewProps) {
   const [items, setItems] = useState<TransferTickerItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [inspectingId, setInspectingId] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState<'Semua' | TransferTickerItem['status']>('Semua');
+  const [filterSource, setFilterSource] = useState<'Semua' | 'Major Leagues' | 'FotMob Live'>('Semua');
 
   const loadData = async () => {
     setLoading(true);
@@ -26,9 +28,31 @@ export function TransferTickerView({ players, onOpenPlayer }: TransferTickerView
   }, []);
 
   const filtered = useMemo(() => {
-    if (filterStatus === 'Semua') return items;
-    return items.filter((item) => item.status === filterStatus);
-  }, [items, filterStatus]);
+    return items.filter((item) => {
+      if (filterStatus !== 'Semua' && item.status !== filterStatus) return false;
+      if (filterSource !== 'Semua' && item.source !== filterSource) return false;
+      return true;
+    });
+  }, [items, filterStatus, filterSource]);
+
+  const handleInspectTransferPlayer = async (item: TransferTickerItem) => {
+    const matched = players.find((p) => p.fotmobId === item.playerFotmobId);
+    if (matched) {
+      onOpenPlayer(matched);
+      return;
+    }
+    if (!item.playerFotmobId) return;
+    setInspectingId(item.id);
+    const hydrated = await getPlayer({
+      fotmobId: item.playerFotmobId,
+      name: item.playerName,
+      clubId: item.clubId,
+    });
+    setInspectingId(null);
+    if (hydrated) {
+      onOpenPlayer(hydrated);
+    }
+  };
 
   return (
     <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-7 space-y-7">
@@ -36,13 +60,13 @@ export function TransferTickerView({ players, onOpenPlayer }: TransferTickerView
         <div>
           <p className="text-xs font-medium text-[#136F73] dark:text-[#2DD4BF] mb-1 flex items-center gap-1.5">
             <TrendingUp className="w-3.5 h-3.5" />
-            Live Transfer Market Ticker
+            Live Multi-Source Transfer Market Ticker
           </p>
           <h1 className="font-display text-3xl font-semibold text-slate-900 dark:text-slate-50">
             Pergerakan Bursa Transfer &amp; Rumor Terkini
           </h1>
           <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-            Pemantauan kesepakatan resmi, negosiasi aktif, dan valuasi klausul rilis lintas liga.
+            Pemantauan kesepakatan resmi 5 liga top Eropa, perpindahan global FotMob, dan valuasi Transfermarkt.
           </p>
         </div>
 
@@ -57,24 +81,52 @@ export function TransferTickerView({ players, onOpenPlayer }: TransferTickerView
         </button>
       </div>
 
-      <div className="flex flex-wrap gap-1.5 p-1.5 rounded-2xl bg-[#E4EFED] dark:bg-[#0D1A1C] border border-[#D4E3E0] dark:border-[#1B3335] w-fit">
-        {(['Semua', 'Confirmed', 'Advanced Talks', 'Rumor'] as const).map((status) => {
-          const active = filterStatus === status;
-          return (
-            <button
-              key={status}
-              type="button"
-              onClick={() => setFilterStatus(status)}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
-                active
-                  ? 'bg-[#136F73] text-white shadow-sm'
-                  : 'text-[#486563] dark:text-[#8FB3B0] hover:text-[#132928] dark:hover:text-white'
-              }`}
-            >
-              {status}
-            </button>
-          );
-        })}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-1.5 p-1.5 rounded-2xl bg-[#E4EFED] dark:bg-[#0D1A1C] border border-[#D4E3E0] dark:border-[#1B3335] w-fit">
+          {(['Semua', 'Confirmed', 'Advanced Talks', 'Rumor'] as const).map((status) => {
+            const active = filterStatus === status;
+            return (
+              <button
+                key={status}
+                type="button"
+                onClick={() => setFilterStatus(status)}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
+                  active
+                    ? 'bg-[#136F73] text-white shadow-sm'
+                    : 'text-[#486563] dark:text-[#8FB3B0] hover:text-[#132928] dark:hover:text-white'
+                }`}
+              >
+                {status}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex flex-wrap gap-1.5 p-1.5 rounded-2xl bg-[#E4EFED] dark:bg-[#0D1A1C] border border-[#D4E3E0] dark:border-[#1B3335] w-fit">
+          {(
+            [
+              { id: 'Semua', label: 'Semua Sumber' },
+              { id: 'Major Leagues', label: '5 Liga Top' },
+              { id: 'FotMob Live', label: 'Global Feed' },
+            ] as const
+          ).map((src) => {
+            const active = filterSource === src.id;
+            return (
+              <button
+                key={src.id}
+                type="button"
+                onClick={() => setFilterSource(src.id)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
+                  active
+                    ? 'bg-[#136F73] text-white shadow-sm'
+                    : 'text-[#486563] dark:text-[#8FB3B0] hover:text-[#132928] dark:hover:text-white'
+                }`}
+              >
+                {src.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="rounded-xl border border-[#DCE8E6] dark:border-[#1B3335] bg-white dark:bg-[#0F1E20] overflow-hidden">
@@ -86,7 +138,7 @@ export function TransferTickerView({ players, onOpenPlayer }: TransferTickerView
                 <th className="py-3.5 px-3">Posisi</th>
                 <th className="py-3.5 px-3">Perpindahan</th>
                 <th className="py-3.5 px-3 text-right">Nilai / Klausul</th>
-                <th className="py-3.5 px-3">Status</th>
+                <th className="py-3.5 px-3">Status &amp; Sumber</th>
                 <th className="py-3.5 px-6 text-right">Profil</th>
               </tr>
             </thead>
@@ -95,6 +147,8 @@ export function TransferTickerView({ players, onOpenPlayer }: TransferTickerView
                 const matchedPlayer = players.find(
                   (p) => p.fotmobId === item.playerFotmobId
                 );
+                const isLoadingRow = inspectingId === item.id;
+                const canInspect = Boolean(matchedPlayer || item.playerFotmobId);
                 return (
                   <tr
                     key={item.id}
@@ -143,14 +197,24 @@ export function TransferTickerView({ players, onOpenPlayer }: TransferTickerView
                       </span>
                     </td>
                     <td className="py-3.5 px-6 text-right">
-                      {matchedPlayer ? (
+                      {canInspect ? (
                         <button
                           type="button"
-                          onClick={() => onOpenPlayer(matchedPlayer)}
-                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#136F73] dark:text-[#2DD4BF] hover:underline whitespace-nowrap"
+                          disabled={isLoadingRow}
+                          onClick={() => handleInspectTransferPlayer(item)}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#136F73] dark:text-[#2DD4BF] hover:underline whitespace-nowrap disabled:opacity-60"
                         >
-                          Inspeksi
-                          <ArrowRight className="w-3.5 h-3.5" />
+                          {isLoadingRow ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              Memuat
+                            </>
+                          ) : (
+                            <>
+                              Inspeksi
+                              <ArrowRight className="w-3.5 h-3.5" />
+                            </>
+                          )}
                         </button>
                       ) : (
                         <span className="text-xs text-slate-400">—</span>

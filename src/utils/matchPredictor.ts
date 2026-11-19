@@ -3,10 +3,20 @@ import type {
   MatchMentality,
   MatchPredictionResult,
   Player,
+  TeamManagerProfile,
 } from '../types/footy';
 import { clamp, getPositionGroup } from './analytics';
 
 export type SlotFitQuality = 'natural' | 'adjacent' | 'outOfPosition';
+
+export interface SquadManagerSynergyReport {
+  synergyScore: number;
+  styleAlignment: number;
+  pressAlignment: number;
+  formationMatch: boolean;
+  managerEdgeBonus: number;
+  notes: string[];
+}
 
 export interface EnhancedMatchPrediction extends MatchPredictionResult {
   favoredSide: 'home' | 'away' | 'draw';
@@ -17,9 +27,14 @@ export interface EnhancedMatchPrediction extends MatchPredictionResult {
   awayLineupCompletenessPct: number;
   homeSquadMarketValueEur: number;
   awaySquadMarketValueEur: number;
+  homeManagerSynergyPct?: number;
+  awayManagerSynergyPct?: number;
 }
 
-export function evaluateSlotFit(playerPosition: string, slotGroup: FormationSlot['positionGroup']): SlotFitQuality {
+export function evaluateSlotFit(
+  playerPosition: string,
+  slotGroup: FormationSlot['positionGroup']
+): SlotFitQuality {
   const playerGroup = getPositionGroup(playerPosition);
   if (playerGroup === slotGroup) return 'natural';
   if (slotGroup === 'GK' || playerGroup === 'GK') return 'outOfPosition';
@@ -46,6 +61,111 @@ function getMentalityModifiers(mentality: MatchMentality) {
     return { atk: 1.0, mid: -2.0, def: 5.5, press: -4.0 };
   }
   return { atk: 2.0, mid: 3.0, def: 2.0, press: 2.0 };
+}
+
+function normalizeFormationCode(f: string): string {
+  return f
+    .toLowerCase()
+    .replace(/-holding|-box|-diamond/g, '')
+    .replace('3-2-4-1', '3-4-2-1')
+    .trim();
+}
+
+export function calculateSquadManagerSynergy(
+  slots: FormationSlot[],
+  assignments: Record<string, Player | undefined>,
+  manager: TeamManagerProfile,
+  activeFormationIdOrName?: string
+): SquadManagerSynergyReport {
+  const filled = slots
+    .map((s) => assignments[s.slotId])
+    .filter((p): p is Player => Boolean(p));
+
+  if (filled.length === 0) {
+    return {
+      synergyScore: 55,
+      styleAlignment: 55,
+      pressAlignment: 55,
+      formationMatch: false,
+      managerEdgeBonus: 0,
+      notes: [`Tambahkan pemain untuk mengukur kecocokan terhadap sistem ${manager.managerName}.`],
+    };
+  }
+
+  const avgRadar = {
+    attacking: filled.reduce((s, p) => s + p.radar.attacking, 0) / filled.length,
+    creativity: filled.reduce((s, p) => s + p.radar.creativity, 0) / filled.length,
+    progression: filled.reduce((s, p) => s + p.radar.progression, 0) / filled.length,
+    defending: filled.reduce((s, p) => s + p.radar.defending, 0) / filled.length,
+    workrate: filled.reduce((s, p) => s + p.radar.workrate, 0) / filled.length,
+    efficiency: filled.reduce((s, p) => s + p.radar.efficiency, 0) / filled.length,
+  };
+  const avgHeight = filled.reduce((s, p) => s + (p.heightCm || 180), 0) / filled.length;
+
+  const techSupply = avgRadar.progression * 0.5 + avgRadar.creativity * 0.3 + avgRadar.efficiency * 0.2;
+  const techDemand = manager.possessionFocus * 0.5 + manager.buildUpStyle * 0.5;
+  const possessionGap = Math.abs(techDemand - techSupply);
+
+  const transitionSupply = avgRadar.attacking * 0.5 + avgRadar.workrate * 0.3 + avgRadar.progression * 0.2;
+  const transitionGap = Math.abs(manager.transitionSpeed - transitionSupply);
+
+  const styleAlignment = Math.round(clamp(96 - possessionGap * 0.55 - transitionGap * 0.35, 42, 99));
+
+  const pressGap = Math.max(0, manager.pressingIntensity - avgRadar.workrate);
+  const lineDefGap =
+    manager.defensiveLine > 78
+      ? Math.max(0, 78 - (avgRadar.workrate * 0.5 + avgRadar.defending * 0.5))
+      : 0;
+  const aerialBonus =
+    manager.aerialPhysicality > 78 && avgHeight >= 182
+      ? 3
+      : manager.aerialPhysicality > 80 && avgHeight < 177
+      ? -5
+      : 0;
+  const pressAlignment = Math.round(
+    clamp(94 - pressGap * 0.75 - lineDefGap * 0.5 + aerialBonus, 40, 99)
+  );
+
+  const formationMatch = activeFormationIdOrName
+    ? normalizeFormationCode(activeFormationIdOrName) ===
+      normalizeFormationCode(manager.primaryFormation)
+    : false;
+  const formationBonus = formationMatch ? 4 : 0;
+
+  const ppg = manager.pointsPerGame ?? 1.8;
+  const winRate = manager.winRatePct ?? 54;
+  const pedigreeBoost = clamp((ppg - 1.7) * 8 + (winRate - 50) * 0.14, -4, 7);
+
+  const synergyScore = Math.round(
+    clamp(styleAlignment * 0.52 + pressAlignment * 0.36 + pedigreeBoost + formationBonus, 40, 99)
+  );
+  const managerEdgeBonus = Number(
+    clamp((synergyScore - 75) * 0.16 + (ppg - 1.8) * 2.2, -3.5, 5.2).toFixed(2)
+  );
+
+  const notes: string[] = [];
+  if (formationMatch) {
+    notes.push(`Formasi selaras dengan skema favorit ${manager.managerName} (${manager.primaryFormation}).`);
+  } else if (activeFormationIdOrName) {
+    notes.push(`Skema ideal ${manager.managerName}: ${manager.primaryFormation} (PPG ${ppg.toFixed(2)}).`);
+  }
+  if (pressGap > 12) {
+    notes.push(
+      `Tuntutan pressing ${manager.pressingIntensity} melampaui rata-rata workrate XI (${Math.round(avgRadar.workrate)}).`
+    );
+  }
+  if (styleAlignment >= 85) {
+    notes.push(`Progresi & penguasaan XI sangat serasi dengan filosofi ${manager.tacticalArchetype || manager.clubName}.`);
+  }
+
+  return {
+    synergyScore,
+    styleAlignment,
+    pressAlignment,
+    formationMatch,
+    managerEdgeBonus,
+    notes,
+  };
 }
 
 function computeTeamTelemetry(
@@ -96,13 +216,19 @@ function computeTeamTelemetry(
     const xaPer90 = player.stats.xA / mins90;
     const ratingFactor = clamp(player.stats.rating * 10.5, 58, 96);
 
-    ratingSum += player.stats.rating * (fit === 'outOfPosition' ? 0.88 : fit === 'adjacent' ? 0.96 : 1);
+    ratingSum +=
+      player.stats.rating * (fit === 'outOfPosition' ? 0.88 : fit === 'adjacent' ? 0.96 : 1);
     totalMarketValueEur += player.marketValueEur || 0;
     workrates.push(player.radar.workrate * fitMult);
 
     if (slot.positionGroup === 'FWD') {
       const threatBonus = clamp(xgPer90 * 24 + xaPer90 * 16 + player.stats.keyPassesPer90 * 3, 0, 18);
-      const score = (player.radar.attacking * 0.48 + player.radar.efficiency * 0.27 + ratingFactor * 0.25 + threatBonus * 0.35) * fitMult;
+      const score =
+        (player.radar.attacking * 0.48 +
+          player.radar.efficiency * 0.27 +
+          ratingFactor * 0.25 +
+          threatBonus * 0.35) *
+        fitMult;
       fwdScores.push(score);
     } else if (slot.positionGroup === 'MID') {
       const controlBonus = clamp(
@@ -146,7 +272,11 @@ function computeTeamTelemetry(
   const pressing = Math.round(clamp((avg(workrates, 68) + mods.press) * completenessScale, 32, 99));
 
   const avgRating = ratingSum / filledEntries.length;
-  const mvLogBoost = clamp(Math.log10(Math.max(10_000_000, totalMarketValueEur) / 10_000_000) * 3.2, 0, 7);
+  const mvLogBoost = clamp(
+    Math.log10(Math.max(10_000_000, totalMarketValueEur) / 10_000_000) * 3.2,
+    0,
+    7
+  );
   const mismatchPenalty = outOfPositionCount * 4.2;
 
   const rawStrength =
@@ -176,16 +306,49 @@ export function predictMatchFromLineups(options: {
   homeSlots: FormationSlot[];
   homeAssignments: Record<string, Player | undefined>;
   homeMentality: MatchMentality;
+  homeFormationName?: string;
+  homeManager?: TeamManagerProfile;
   awaySlots: FormationSlot[];
   awayAssignments: Record<string, Player | undefined>;
   awayMentality: MatchMentality;
+  awayFormationName?: string;
+  awayManager?: TeamManagerProfile;
 }): EnhancedMatchPrediction {
-  const home = computeTeamTelemetry(options.homeSlots, options.homeAssignments, options.homeMentality);
-  const away = computeTeamTelemetry(options.awaySlots, options.awayAssignments, options.awayMentality);
+  const home = computeTeamTelemetry(
+    options.homeSlots,
+    options.homeAssignments,
+    options.homeMentality
+  );
+  const away = computeTeamTelemetry(
+    options.awaySlots,
+    options.awayAssignments,
+    options.awayMentality
+  );
 
-  // Modest home ground edge (+3.2 points)
-  const homeStrength = Math.round(clamp(home.strength + (home.filledCount > 0 ? 3.2 : 0), 30, 99));
-  const awayStrength = away.strength;
+  const homeSynergy = options.homeManager
+    ? calculateSquadManagerSynergy(
+        options.homeSlots,
+        options.homeAssignments,
+        options.homeManager,
+        options.homeFormationName
+      )
+    : null;
+  const awaySynergy = options.awayManager
+    ? calculateSquadManagerSynergy(
+        options.awaySlots,
+        options.awayAssignments,
+        options.awayManager,
+        options.awayFormationName
+      )
+    : null;
+
+  // Modest home ground edge (+3.2 points) + manager synergy edge
+  const homeStrength = Math.round(
+    clamp(home.strength + (home.filledCount > 0 ? 3.2 : 0) + (homeSynergy?.managerEdgeBonus ?? 0), 30, 99)
+  );
+  const awayStrength = Math.round(
+    clamp(away.strength + (awaySynergy?.managerEdgeBonus ?? 0), 30, 99)
+  );
 
   const diff = homeStrength - awayStrength;
   const drawPct = Math.round(clamp(28 - Math.abs(diff) * 0.45, 12, 31));
@@ -201,10 +364,23 @@ export function predictMatchFromLineups(options: {
       ? -0.25
       : 0;
 
+  const homeMgrXgMod = homeSynergy ? (homeSynergy.managerEdgeBonus * 0.04) : 0;
+  const awayMgrXgMod = awaySynergy ? (awaySynergy.managerEdgeBonus * 0.04) : 0;
+
   const rawHomeXg =
-    1.28 + (home.attack - away.defense) * 0.023 + (home.midfield - away.midfield) * 0.012 + tempoBoost + blockDrag;
+    1.28 +
+    (home.attack - away.defense) * 0.023 +
+    (home.midfield - away.midfield) * 0.012 +
+    tempoBoost +
+    blockDrag +
+    homeMgrXgMod;
   const rawAwayXg =
-    1.12 + (away.attack - home.defense) * 0.023 + (away.midfield - home.midfield) * 0.012 + tempoBoost + blockDrag;
+    1.12 +
+    (away.attack - home.defense) * 0.023 +
+    (away.midfield - home.midfield) * 0.012 +
+    tempoBoost +
+    blockDrag +
+    awayMgrXgMod;
 
   const projectedHomeXg = Number(clamp(rawHomeXg, 0.35, 3.6).toFixed(2));
   const projectedAwayXg = Number(clamp(rawAwayXg, 0.3, 3.4).toFixed(2));
@@ -265,19 +441,45 @@ export function predictMatchFromLineups(options: {
     },
   ];
 
+  if (homeSynergy || awaySynergy) {
+    const hSyn = homeSynergy?.synergyScore ?? 72;
+    const aSyn = awaySynergy?.synergyScore ?? 72;
+    tacticalEdges.push({
+      label: 'Sinergi Pelatih',
+      homeVal: hSyn,
+      awayVal: aSyn,
+      winner: Math.abs(hSyn - aSyn) <= 2 ? 'even' : hSyn > aSyn ? 'home' : 'away',
+    });
+  }
+
   let keyInsight =
     'Duel seimbang antar lini; kontrol setengah lapangan dan efisiensi peluang akan menentukan pemenang.';
   if (home.outOfPositionCount > 0 && home.outOfPositionCount > away.outOfPositionCount) {
     keyInsight = `Terdapat ${home.outOfPositionCount} pemain tuan rumah di luar posisi natural — menempatkan pemain sesuai peran akan menaikkan Estimated Match Win Probability.`;
   } else if (away.outOfPositionCount > 0 && away.outOfPositionCount > home.outOfPositionCount) {
     keyInsight = `Tim tamu memiliki ${away.outOfPositionCount} pemain di luar posisi natural, membuka celah struktur bagi tuan rumah.`;
+  } else if (
+    homeSynergy &&
+    awaySynergy &&
+    Math.abs(homeSynergy.synergyScore - awaySynergy.synergyScore) >= 6
+  ) {
+    const edgeLeader =
+      homeSynergy.synergyScore > awaySynergy.synergyScore
+        ? options.homeManager?.managerName
+        : options.awayManager?.managerName;
+    const edgeGap = Math.abs(homeSynergy.synergyScore - awaySynergy.synergyScore);
+    keyInsight = `Kecocokan taktik XI bersama ${edgeLeader} unggul +${edgeGap} poin sinergi pelatih, mendongkrak efisiensi struktur pertandingan.`;
   } else if (home.midfield - away.midfield >= 6) {
-    keyInsight = `Tuan rumah memegang keunggulan kontrol poros tengah (+${home.midfield - away.midfield} poin), ideal untuk mengurung blok lawan.`;
+    keyInsight = `Tuan rumah memegang keunggulan kontrol poros tengah (+${
+      home.midfield - away.midfield
+    } poin), ideal untuk mengurung blok lawan.`;
   } else if (away.attack - home.defense >= 6) {
     keyInsight =
       'Daya ledak lini depan tim tamu berpotensi mengeksploitasi celah di belakang garis pertahanan tuan rumah.';
   } else if (home.attack - away.defense >= 6) {
-    keyInsight = `Superioritas final-third tuan rumah memberi proyeksi xG tinggi (${projectedHomeXg.toFixed(2)} xG).`;
+    keyInsight = `Superioritas final-third tuan rumah memberi proyeksi xG tinggi (${projectedHomeXg.toFixed(
+      2
+    )} xG).`;
   } else if (away.pressing - home.pressing >= 6) {
     keyInsight =
       'Intensitas pressing tim tamu lebih agresif dan siap memaksa kesalahan build-up tuan rumah.';
@@ -315,5 +517,8 @@ export function predictMatchFromLineups(options: {
     awayLineupCompletenessPct: away.completenessPct,
     homeSquadMarketValueEur: home.totalMarketValueEur,
     awaySquadMarketValueEur: away.totalMarketValueEur,
+    homeManagerSynergyPct: homeSynergy?.synergyScore,
+    awayManagerSynergyPct: awaySynergy?.synergyScore,
   };
 }
+

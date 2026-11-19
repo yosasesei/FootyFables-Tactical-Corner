@@ -15,9 +15,9 @@ test('getGasApiUrl falls back to provided live GAS endpoint', () => {
 test('normalizeGasPlayer maps snake_case GAS payload, radar_json, marketHistory, and transferHistory', () => {
   const normalized = normalizeGasPlayer(
     {
-      fotmob_id: '961995',
+      fotmob_id: '999995',
       tm_id: '357565',
-      name: 'Rodri Test',
+      name: 'Midfield Maestro Test',
       club: 'Manchester City',
       league: 'Premier League',
       nationality: 'Spain',
@@ -68,11 +68,15 @@ test('normalizeGasPlayer maps snake_case GAS payload, radar_json, marketHistory,
     ]
   );
 
-  assert.equal(normalized.fotmobId, '961995');
+  assert.equal(normalized.fotmobId, '999995');
   assert.equal(normalized.stats.rating, 8.05);
   assert.equal(normalized.radar.progression, 97);
-  assert.equal(normalized.marketValueHistory.length, 1);
-  assert.equal(normalized.marketValueHistory[0].date, '2024-10');
+  assert.ok(normalized.marketValueHistory.length >= 2);
+  assert.ok(normalized.marketValueHistory.some((m) => m.date === '2024-10'));
+  assert.equal(
+    normalized.marketValueHistory[normalized.marketValueHistory.length - 1].date,
+    '2026-11'
+  );
   assert.equal(normalized.transferHistory.length, 1);
   assert.equal(normalized.transferHistory[0].fromClub, 'Atlético Madrid');
   assert.equal(normalized.syncedToSheets, true);

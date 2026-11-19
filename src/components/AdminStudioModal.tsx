@@ -20,6 +20,12 @@ import {
   setAdminPin,
   setGasApiUrl,
 } from '../services/gasApi';
+import {
+  clearExternalSourcesCache,
+  getExternalSourcesConfig,
+  setExternalSourcesConfig,
+  testTmScraperConnection,
+} from '../services/externalSources';
 import type {
   Article,
   ArticleCategory,
@@ -84,7 +90,12 @@ export function AdminStudioModal({
   const [mgrSummary, setMgrSummary] = useState(managers[0]?.tacticalSummary || '');
 
   // Tab 3: API & Cache Settings
+  const initialExtCfg = getExternalSourcesConfig();
   const [gasUrlInput, setGasUrlInput] = useState(() => getGasApiUrl());
+  const [tmScraperUrlInput, setTmScraperUrlInput] = useState(() => initialExtCfg.tmScraperUrl);
+  const [enableOptaInput, setEnableOptaInput] = useState(() => initialExtCfg.enableOptaFeed);
+  const [enableSalimtInput, setEnableSalimtInput] = useState(() => initialExtCfg.enableSalimtDataset);
+  const [testingScraper, setTestingScraper] = useState(false);
   const [newPinInput, setNewPinInput] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
@@ -260,11 +271,26 @@ export function AdminStudioModal({
   const handleSaveSettings = (e: React.FormEvent) => {
     e.preventDefault();
     setGasApiUrl(gasUrlInput);
+    setExternalSourcesConfig({
+      tmScraperUrl: tmScraperUrlInput,
+      enableOptaFeed: enableOptaInput,
+      enableSalimtDataset: enableSalimtInput,
+    });
+    clearExternalSourcesCache();
     if (newPinInput.trim().length >= 4) {
       setAdminPin(newPinInput.trim());
       setNewPinInput('');
     }
-    setStatusNotice('Konfigurasi GAS_API_URL dan keamanan PIN berhasil diperbarui.');
+    setStatusNotice(
+      'Konfigurasi GAS_API_URL, Transfermarkt Scraper, Opta Feed, dan salimt/football-datasets disimpan.'
+    );
+  };
+
+  const handleTestTmScraper = async () => {
+    setTestingScraper(true);
+    const res = await testTmScraperConnection(tmScraperUrlInput);
+    setTestingScraper(false);
+    setStatusNotice(res.message);
   };
 
   const handleForceRefresh = async () => {
@@ -705,6 +731,72 @@ export function AdminStudioModal({
                         Disimpan di localStorage untuk menimpa VITE_GAS_API_URL secara dinamis tanpa
                         rebuild saat berpindah domain.
                       </p>
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="tm-scraper-url-input"
+                        className="block text-xs font-semibold text-slate-700 dark:text-slate-200 mb-1"
+                      >
+                        Transfermarkt Scraper API URL (github.com/topics/transfermarkt-scraper)
+                      </label>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          id="tm-scraper-url-input"
+                          type="url"
+                          value={tmScraperUrlInput}
+                          onChange={(e) => setTmScraperUrlInput(e.target.value)}
+                          placeholder="https://transfermarkt-api-anda.domain.com (opsional)"
+                          className="flex-1 px-3.5 py-2.5 rounded-lg text-sm font-mono bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleTestTmScraper}
+                          disabled={testingScraper || !tmScraperUrlInput.trim()}
+                          className="px-3.5 py-2 rounded-lg text-xs font-semibold border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 hover:border-emerald-500 disabled:opacity-50 whitespace-nowrap"
+                        >
+                          {testingScraper ? 'Menguji...' : 'Uji Koneksi'}
+                        </button>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Mendukung REST API kompatibel felipeall/transfermarkt-api (/players/&#123;id&#125;/profile, /market_value, /transfers).
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                      <label className="flex items-start gap-2.5 p-3 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={enableOptaInput}
+                          onChange={(e) => setEnableOptaInput(e.target.checked)}
+                          className="mt-0.5 accent-emerald-600"
+                        />
+                        <span className="text-xs">
+                          <span className="font-semibold text-slate-800 dark:text-slate-100 block">
+                            Opta Live Telemetry Feed
+                          </span>
+                          <span className="text-slate-500">
+                            Sinkronkan xG, xA, Top Speed, &amp; Line-Breaking Passes langsung dari CDN liga aktif.
+                          </span>
+                        </span>
+                      </label>
+
+                      <label className="flex items-start gap-2.5 p-3 rounded-lg bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={enableSalimtInput}
+                          onChange={(e) => setEnableSalimtInput(e.target.checked)}
+                          className="mt-0.5 accent-emerald-600"
+                        />
+                        <span className="text-xs">
+                          <span className="font-semibold text-slate-800 dark:text-slate-100 block">
+                            salimt/football-datasets Datalake
+                          </span>
+                          <span className="text-slate-500">
+                            Enrich profil, kontrak, market value, &amp; log cedera 2026 dari repositori terbuka GitHub.
+                          </span>
+                        </span>
+                      </label>
                     </div>
 
                     <div>

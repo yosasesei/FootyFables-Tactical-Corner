@@ -1,13 +1,18 @@
-import { useMemo, useState } from 'react';
-import { AlertCircle, CheckCircle2, Compass, Sliders, Users } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { AlertCircle, Award, CheckCircle2, Compass, Search, Sliders, Users } from 'lucide-react';
 import type { Player, TacticalParameters, TeamManagerProfile } from '../types/footy';
-import { calculateTacticalFit, formatMarketValue } from '../utils/analytics';
+import {
+  calculateTacticalFit,
+  formatMarketValue,
+  rankManagersForPlayer,
+} from '../utils/analytics';
 import { PlayerAvatar } from './PlayerAvatar';
 
 interface TacticalFitViewProps {
   players: Player[];
   managers: TeamManagerProfile[];
   initialPlayerId?: string;
+  initialManagerId?: string;
   onOpenPlayer: (player: Player) => void;
 }
 
@@ -15,13 +20,29 @@ export function TacticalFitView({
   players,
   managers,
   initialPlayerId,
+  initialManagerId,
   onOpenPlayer,
 }: TacticalFitViewProps) {
   const [selectedPlayerId, setSelectedPlayerId] = useState<string>(
     initialPlayerId || players[0]?.fotmobId || ''
   );
   const [mode, setMode] = useState<'manager' | 'custom'>('manager');
-  const [selectedManagerId, setSelectedManagerId] = useState<string>(managers[0]?.id || '');
+  const [selectedManagerId, setSelectedManagerId] = useState<string>(
+    initialManagerId || managers[0]?.id || ''
+  );
+  const [managerLeagueFilter, setManagerLeagueFilter] = useState<string>('all');
+  const [managerSearch, setManagerSearch] = useState<string>('');
+
+  useEffect(() => {
+    if (initialPlayerId) setSelectedPlayerId(initialPlayerId);
+  }, [initialPlayerId]);
+
+  useEffect(() => {
+    if (initialManagerId) {
+      setSelectedManagerId(initialManagerId);
+      setMode('manager');
+    }
+  }, [initialManagerId]);
 
   const [customParams, setCustomParams] = useState<TacticalParameters>({
     pressingIntensity: 84,
@@ -37,9 +58,31 @@ export function TacticalFitView({
     [players, selectedPlayerId]
   );
 
+  const managerLeagues = useMemo(() => {
+    const unique = Array.from(new Set(managers.map((m) => m.league).filter(Boolean)));
+    return unique;
+  }, [managers]);
+
+  const filteredManagers = useMemo(() => {
+    const q = managerSearch.trim().toLowerCase();
+    return managers.filter((m) => {
+      if (managerLeagueFilter !== 'all' && m.league !== managerLeagueFilter) return false;
+      if (!q) return true;
+      return (
+        m.managerName.toLowerCase().includes(q) ||
+        m.clubName.toLowerCase().includes(q) ||
+        m.league.toLowerCase().includes(q) ||
+        (m.tacticalArchetype || '').toLowerCase().includes(q)
+      );
+    });
+  }, [managers, managerLeagueFilter, managerSearch]);
+
   const selectedManager = useMemo(
-    () => managers.find((m) => m.id === selectedManagerId) || managers[0],
-    [managers, selectedManagerId]
+    () =>
+      managers.find((m) => m.id === selectedManagerId) ||
+      filteredManagers[0] ||
+      managers[0],
+    [managers, filteredManagers, selectedManagerId]
   );
 
   const activeParams: TacticalParameters = useMemo(() => {
@@ -60,6 +103,11 @@ export function TacticalFitView({
     if (!selectedPlayer) return null;
     return calculateTacticalFit(selectedPlayer, activeParams, players);
   }, [selectedPlayer, activeParams, players]);
+
+  const topManagerMatches = useMemo(() => {
+    if (!selectedPlayer) return [];
+    return rankManagersForPlayer(selectedPlayer, managers, 5);
+  }, [selectedPlayer, managers]);
 
   if (!selectedPlayer || !fitResult) return null;
 
@@ -143,13 +191,49 @@ export function TacticalFitView({
 
             {mode === 'manager' ? (
               <div className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <select
+                    aria-label="Filter Liga Pelatih"
+                    value={managerLeagueFilter}
+                    onChange={(e) => {
+                      const nextLeague = e.target.value;
+                      setManagerLeagueFilter(nextLeague);
+                      const firstInLeague =
+                        nextLeague === 'all'
+                          ? managers[0]
+                          : managers.find((m) => m.league === nextLeague);
+                      if (firstInLeague) setSelectedManagerId(firstInLeague.id);
+                    }}
+                    className="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="all">Semua Liga ({managers.length} Pelatih)</option>
+                    {managerLeagues.map((lg) => (
+                      <option key={lg} value={lg}>
+                        {lg}
+                      </option>
+                    ))}
+                  </select>
+
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={managerSearch}
+                      onChange={(e) => setManagerSearch(e.target.value)}
+                      placeholder="Cari pelatih / klub..."
+                      aria-label="Cari pelatih dunia"
+                      className="w-full pl-8 pr-3 py-2 rounded-lg text-xs bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+
                 <select
                   aria-label="Pilih Profil Pelatih"
                   value={selectedManager?.id || ''}
                   onChange={(e) => setSelectedManagerId(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-lg text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
                 >
-                  {managers.map((m) => (
+                  {(filteredManagers.length > 0 ? filteredManagers : managers).map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.managerName} · {m.clubName} ({m.primaryFormation})
                     </option>
@@ -157,11 +241,91 @@ export function TacticalFitView({
                 </select>
 
                 {selectedManager && (
-                  <div className="p-4 rounded-lg bg-slate-50 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800 space-y-2">
-                    <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                      {selectedManager.managerName} · {selectedManager.primaryFormation}
+                  <div
+                    data-testid="selected-manager-stats"
+                    className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800 space-y-3"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {selectedManager.managerName} · {selectedManager.primaryFormation}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                          {selectedManager.clubName} · {selectedManager.league}
+                          {selectedManager.nationality ? ` · ${selectedManager.nationality}` : ''}
+                          {selectedManager.age ? ` (${selectedManager.age} thn)` : ''}
+                        </div>
+                        {selectedManager.tacticalArchetype && (
+                          <div className="text-[11px] font-medium text-[#136F73] dark:text-[#2DD4BF] mt-0.5">
+                            {selectedManager.tacticalArchetype}
+                          </div>
+                        )}
+                      </div>
+                      {selectedManager.syncedLive && (
+                        <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-[#136F73] dark:text-[#2DD4BF] text-[10px] font-semibold shrink-0">
+                          Live Sync
+                        </span>
+                      )}
                     </div>
-                    <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+
+                    {/* Full Coaching Performance Metrics */}
+                    <div className="grid grid-cols-4 gap-2 py-2.5 border-y border-slate-200/70 dark:border-slate-800 text-center font-mono-num">
+                      <div>
+                        <div className="text-[10px] text-slate-500">PPG</div>
+                        <div className="text-sm font-semibold text-[#136F73] dark:text-[#2DD4BF]">
+                          {(selectedManager.pointsPerGame ?? 1.82).toFixed(2)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-slate-500">Win %</div>
+                        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {(selectedManager.winRatePct ?? 55.0).toFixed(1)}%
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-slate-500">Laga</div>
+                        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {selectedManager.matchesManaged ?? 120}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-slate-500">Trofi</div>
+                        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {selectedManager.trophiesCount ?? 0}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 6 Tactical Axis Bars */}
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                      {(
+                        [
+                          ['Pressing', selectedManager.pressingIntensity],
+                          ['Possession', selectedManager.possessionFocus],
+                          ['Transition', selectedManager.transitionSpeed],
+                          ['Build-Up', selectedManager.buildUpStyle],
+                          ['Def. Line', selectedManager.defensiveLine],
+                          ['Aerial/Phys', selectedManager.aerialPhysicality],
+                        ] as Array<[string, number]>
+                      ).map(([lbl, val]) => (
+                        <div key={lbl} className="space-y-1">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-slate-500 dark:text-slate-400">{lbl}</span>
+                            <span className="font-mono-num font-semibold text-slate-800 dark:text-slate-200">
+                              {val}
+                            </span>
+                          </div>
+                          <div className="h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-[#136F73] dark:bg-[#2DD4BF]"
+                              style={{ width: `${val}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed pt-1">
                       {selectedManager.tacticalSummary}
                     </p>
                   </div>
@@ -281,6 +445,63 @@ export function TacticalFitView({
                   ))}
                 </ul>
               </div>
+            </div>
+          </div>
+
+          {/* Top 5 World Managers for Selected Player */}
+          <div
+            data-testid="top-world-managers-ranking"
+            className="p-6 rounded-2xl border border-[#DCE8E6] dark:border-[#1B3335] bg-white dark:bg-[#0F1E20] space-y-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <Award className="w-4 h-4 text-[#136F73] dark:text-[#2DD4BF]" />
+                Top 5 Pelatih Dunia Paling Cocok untuk {selectedPlayer.name}
+              </h2>
+              <span className="text-xs text-slate-500 font-mono-num">
+                Evaluasi {managers.length} Pelatih Dunia
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+              {topManagerMatches.map(({ manager, fit }, idx) => {
+                const isActive = mode === 'manager' && selectedManager?.id === manager.id;
+                return (
+                  <button
+                    key={manager.id}
+                    type="button"
+                    onClick={() => {
+                      setMode('manager');
+                      setSelectedManagerId(manager.id);
+                    }}
+                    className={`p-3.5 rounded-xl border text-left transition-all flex flex-col justify-between gap-2 ${
+                      isActive
+                        ? 'border-[#136F73] dark:border-[#2DD4BF] bg-[#EBF5F4] dark:bg-[#112A2C]'
+                        : 'border-[#DCE8E6] dark:border-[#1B3335] bg-slate-50/60 dark:bg-slate-900/50 hover:border-[#136F73]/60'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between gap-1 text-[10px] font-mono-num">
+                        <span className="text-slate-500">#{idx + 1}</span>
+                        <span className="font-bold text-[#136F73] dark:text-[#2DD4BF] text-sm">
+                          {fit.overallScore}%
+                        </span>
+                      </div>
+                      <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate mt-1">
+                        {manager.managerName}
+                      </div>
+                      <div className="text-[11px] text-slate-500 truncate">
+                        {manager.clubName} · {manager.league}
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-200/60 dark:border-slate-800 flex items-center justify-between gap-2 text-[10px] font-mono-num text-slate-500 whitespace-nowrap">
+                      <span className="whitespace-nowrap">{manager.primaryFormation}</span>
+                      <span className="whitespace-nowrap">PPG {(manager.pointsPerGame ?? 1.8).toFixed(2)}</span>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
 

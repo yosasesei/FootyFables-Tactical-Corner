@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateSlotFit, predictMatchFromLineups } from './matchPredictor';
-import type { FormationSlot, Player } from '../types/footy';
+import {
+  calculateSquadManagerSynergy,
+  evaluateSlotFit,
+  predictMatchFromLineups,
+} from './matchPredictor';
+import type { FormationSlot, Player, TeamManagerProfile } from '../types/footy';
 
 function makePlayer(overrides: Partial<Player> & { fotmobId: string; name: string }): Player {
   return {
@@ -151,4 +155,66 @@ test('predictMatchFromLineups computes probabilities summing to 100 and penalize
   assert.ok(scrambledMatch.homeOutOfPositionCount >= 2);
   assert.ok(scrambledMatch.homeWinPct < naturalMatch.homeWinPct);
   assert.ok(scrambledMatch.homeStrength < naturalMatch.homeStrength);
+});
+
+test('calculateSquadManagerSynergy and predictMatchFromLineups reflect manager tactical parameters', () => {
+  const gk = makePlayer({ fotmobId: '1', name: 'Keeper', primaryPosition: 'GK' });
+  const cb = makePlayer({ fotmobId: '2', name: 'Defender', primaryPosition: 'CB' });
+  const cm = makePlayer({ fotmobId: '3', name: 'Midfielder', primaryPosition: 'CM' });
+  const st = makePlayer({ fotmobId: '4', name: 'Striker', primaryPosition: 'ST' });
+
+  const eliteManager: TeamManagerProfile = {
+    id: 'mgr-elite',
+    managerName: 'Elite Coach',
+    clubName: 'Test FC',
+    league: 'Premier League',
+    primaryFormation: '4-3-3',
+    pointsPerGame: 2.32,
+    winRatePct: 72.5,
+    pressingIntensity: 84,
+    possessionFocus: 85,
+    transitionSpeed: 74,
+    buildUpStyle: 85,
+    defensiveLine: 80,
+    aerialPhysicality: 75,
+    tacticalSummary: 'Possession & high press.',
+  };
+
+  const lowSynergyManager: TeamManagerProfile = {
+    id: 'mgr-low',
+    managerName: 'Low Pedigree Coach',
+    clubName: 'Other FC',
+    league: 'Premier League',
+    primaryFormation: '5-4-1',
+    pointsPerGame: 1.05,
+    winRatePct: 28.0,
+    pressingIntensity: 99,
+    possessionFocus: 30,
+    transitionSpeed: 95,
+    buildUpStyle: 32,
+    defensiveLine: 30,
+    aerialPhysicality: 98,
+    tacticalSummary: 'Deep direct block.',
+  };
+
+  const synHigh = calculateSquadManagerSynergy(sampleSlots, { gk, cb, cm, st }, eliteManager, '4-3-3');
+  const synLow = calculateSquadManagerSynergy(sampleSlots, { gk, cb, cm, st }, lowSynergyManager, '4-3-3');
+  assert.ok(synHigh.synergyScore > synLow.synergyScore);
+
+  const res = predictMatchFromLineups({
+    homeSlots: sampleSlots,
+    homeAssignments: { gk, cb, cm, st },
+    homeMentality: 'Balanced',
+    homeFormationName: '4-3-3',
+    homeManager: eliteManager,
+    awaySlots: sampleSlots,
+    awayAssignments: { gk, cb, cm, st },
+    awayMentality: 'Balanced',
+    awayFormationName: '4-3-3',
+    awayManager: lowSynergyManager,
+  });
+
+  assert.ok(res.tacticalEdges.some((e) => e.label === 'Sinergi Pelatih'));
+  assert.ok((res.homeManagerSynergyPct ?? 0) > (res.awayManagerSynergyPct ?? 0));
+  assert.ok(res.homeWinPct > res.awayWinPct);
 });

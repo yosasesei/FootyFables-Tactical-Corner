@@ -10,12 +10,18 @@ import {
   X,
 } from 'lucide-react';
 import { TACTICAL_FORMATIONS } from '../data/fallbackData';
-import type { FormationSlot, Player } from '../types/footy';
-import { analyzeSquadBalance, formatMarketValue } from '../utils/analytics';
+import { WORLD_MANAGERS } from '../data/worldManagers';
+import type { FormationSlot, Player, TeamManagerProfile } from '../types/footy';
+import {
+  analyzeSquadBalance,
+  calculateSquadManagerSynergy,
+  formatMarketValue,
+} from '../utils/analytics';
 import { PlayerAvatar } from './PlayerAvatar';
 
 interface SquadBuilderViewProps {
   players: Player[];
+  managers?: TeamManagerProfile[];
   onOpenPlayer: (player: Player) => void;
 }
 
@@ -43,10 +49,15 @@ const DEFAULT_SLOT_ASSIGNMENTS: Record<string, string> = {
   rst: '737066',
 };
 
-export function SquadBuilderView({ players, onOpenPlayer }: SquadBuilderViewProps) {
+export function SquadBuilderView({
+  players,
+  managers = WORLD_MANAGERS,
+  onOpenPlayer,
+}: SquadBuilderViewProps) {
   const [formationId, setFormationId] = useState<string>(TACTICAL_FORMATIONS[0].id);
   const [phase, setPhase] = useState<'inPossession' | 'outOfPossession'>('inPossession');
   const [assignments, setAssignments] = useState<Record<string, string>>(DEFAULT_SLOT_ASSIGNMENTS);
+  const [selectedManagerId, setSelectedManagerId] = useState<string>(managers[0]?.id || '');
   const [summoningSlot, setSummoningSlot] = useState<FormationSlot | null>(null);
   const [summonQuery, setSummonQuery] = useState('');
 
@@ -74,6 +85,21 @@ export function SquadBuilderView({ players, onOpenPlayer }: SquadBuilderViewProp
     () => analyzeSquadBalance(formation.slots, assignedPlayersBySlot),
     [formation.slots, assignedPlayersBySlot]
   );
+
+  const targetManager = useMemo(
+    () => managers.find((m) => m.id === selectedManagerId) || managers[0],
+    [managers, selectedManagerId]
+  );
+
+  const managerSynergy = useMemo(() => {
+    if (!targetManager) return null;
+    return calculateSquadManagerSynergy(
+      formation.slots,
+      assignedPlayersBySlot,
+      targetManager,
+      formation.name
+    );
+  }, [formation, assignedPlayersBySlot, targetManager]);
 
   const filteredSummonPlayers = useMemo(() => {
     const q = summonQuery.trim().toLowerCase();
@@ -385,6 +411,52 @@ export function SquadBuilderView({ players, onOpenPlayer }: SquadBuilderViewProp
                 </div>
               ))}
             </div>
+
+            {/* Target World Manager Synergy Analyzer */}
+            {managers.length > 0 && (
+              <div className="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="squad-manager-select"
+                    className="text-xs font-semibold text-slate-700 dark:text-slate-200"
+                  >
+                    Pelatih Sistem Target
+                  </label>
+                  {managerSynergy && (
+                    <span className="font-mono-num text-xs font-bold text-[#136F73] dark:text-[#2DD4BF]">
+                      Sinergi {managerSynergy.synergyScore}%
+                    </span>
+                  )}
+                </div>
+
+                <select
+                  id="squad-manager-select"
+                  value={targetManager?.id || ''}
+                  onChange={(e) => setSelectedManagerId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg text-xs font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100"
+                >
+                  {managers.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.managerName} · {m.clubName} ({m.primaryFormation})
+                    </option>
+                  ))}
+                </select>
+
+                {targetManager && managerSynergy && (
+                  <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 space-y-1.5 text-[11px]">
+                    <div className="flex items-center justify-between font-mono-num text-slate-600 dark:text-slate-300">
+                      <span>Style {managerSynergy.styleAlignment}% · Press {managerSynergy.pressAlignment}%</span>
+                      <span>PPG {(targetManager.pointsPerGame ?? 1.8).toFixed(2)}</span>
+                    </div>
+                    {managerSynergy.notes[0] && (
+                      <p className="text-slate-500 dark:text-slate-400 leading-snug">
+                        {managerSynergy.notes[0]}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Tactical Warnings */}
             <div className="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-2">

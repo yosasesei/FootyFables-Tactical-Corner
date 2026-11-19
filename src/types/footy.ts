@@ -45,6 +45,31 @@ export interface TransferRecord {
   type: 'Permanent' | 'Loan' | 'Free' | 'Youth Promotion';
 }
 
+export interface PlayerInjuryInfo {
+  reason: string;
+  season?: string;
+  fromDate?: string;
+  endDate?: string;
+  gamesMissed?: number;
+  source: string;
+}
+
+export interface PlayerOptaExtras {
+  topSpeedKmh?: number;
+  lineBreakingPassesPer90?: number;
+  bigChancesCreated?: number;
+  defensiveActionsPer90?: number;
+  ballRecoveriesPer90?: number;
+  possWonAtt3rdPer90?: number;
+  savePercentage?: number;
+}
+
+export interface ExternalSourcesConfig {
+  tmScraperUrl: string;
+  enableOptaFeed: boolean;
+  enableSalimtDataset: boolean;
+}
+
 export interface Player {
   fotmobId: string;
   tmId: string;
@@ -70,6 +95,9 @@ export interface Player {
   marketValueHistory: MarketValuePoint[];
   transferHistory: TransferRecord[];
   recentMatches?: MatchRatingPoint[];
+  optaExtras?: PlayerOptaExtras;
+  injuryStatus?: PlayerInjuryInfo | null;
+  dataSources?: string[];
 }
 
 export interface MatchRatingPoint {
@@ -83,6 +111,7 @@ export interface MatchRatingPoint {
   minutes: number;
   goals: number;
   assists: number;
+  isLiveFixture?: boolean;
 }
 
 export interface Article {
@@ -116,6 +145,15 @@ export interface TeamManagerProfile extends TacticalParameters {
   league: string;
   primaryFormation: string;
   tacticalSummary: string;
+  nationality?: string;
+  age?: number;
+  fotmobCoachId?: string;
+  pointsPerGame?: number;
+  winRatePct?: number;
+  matchesManaged?: number;
+  tacticalArchetype?: string;
+  trophiesCount?: number;
+  syncedLive?: boolean;
 }
 
 export interface LeagueClub {
@@ -150,6 +188,9 @@ export interface TransferTickerItem {
   status: 'Confirmed' | 'Advanced Talks' | 'Rumor';
   reliability: string;
   updatedAt: string;
+  clubId?: string;
+  leagueName?: string;
+  source?: 'FotMob Live' | 'Major Leagues' | 'salimt Datalake' | 'TM Scraper' | 'Editorial Feed';
 }
 
 export interface FormationSlot {

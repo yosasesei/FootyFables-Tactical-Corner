@@ -30,6 +30,10 @@ export interface LeaguePlayerTelemetry {
   interceptionsPer90?: number;
   possWonAtt3rdPer90?: number;
   savePercentage?: number;
+  topSpeedKmh?: number;
+  bigChancesCreated?: number;
+  defensiveActionsPer90?: number;
+  ballRecoveriesPer90?: number;
 }
 
 const STAT_FILES = [
@@ -47,14 +51,51 @@ const STAT_FILES = [
   { key: 'interception', file: 'interception.json' },
   { key: 'poss_won_att_3rd', file: 'poss_won_att_3rd.json' },
   { key: 'save_percentage', file: '_save_percentage.json' },
+  { key: 'phys_ts', file: 'phys_ts.json' },
+  { key: 'big_chance_created', file: 'big_chance_created.json' },
+  { key: 'defensive_contributions', file: 'defensive_contributions.json' },
+  { key: 'ball_recovery', file: 'ball_recovery.json' },
 ] as const;
 
 type StatFileKey = (typeof STAT_FILES)[number]['key'];
 
 const leagueStatsCache = new Map<string, Promise<Map<string, LeaguePlayerTelemetry>>>();
+const leagueOptaUrlRegistry = new Map<string, { seasonId: string; urls: string[] }>();
 
 export function clearLeagueStatsCache(): void {
   leagueStatsCache.clear();
+}
+
+export function extractOptaSeasonFromUrls(urls: string[]): { seasonId: string; urls: string[] } | null {
+  const clean = urls.map((u) => String(u || '').trim()).filter(Boolean);
+  if (clean.length === 0) return null;
+  for (const url of clean) {
+    const m = url.match(/\/stats\/\d+\/season\/([^/]+)\//i);
+    if (m && m[1]) {
+      return { seasonId: m[1], urls: clean };
+    }
+  }
+  return { seasonId: '', urls: clean };
+}
+
+export function registerLeagueOptaUrls(
+  leagueId: string | number,
+  seasonId: string | number | undefined,
+  urls: string[]
+): void {
+  const lId = String(leagueId || '').trim();
+  if (!lId || !Array.isArray(urls) || urls.length === 0) return;
+  const extracted = extractOptaSeasonFromUrls(urls);
+  if (!extracted) return;
+  const resolvedSeason = String(seasonId || extracted.seasonId || '').trim();
+  if (!resolvedSeason) return;
+  leagueOptaUrlRegistry.set(lId, { seasonId: resolvedSeason, urls: extracted.urls });
+}
+
+export function getRegisteredLeagueOptaInfo(
+  leagueId: string | number
+): { seasonId: string; urls: string[] } | undefined {
+  return leagueOptaUrlRegistry.get(String(leagueId || '').trim());
 }
 
 function clamp(val: number, min: number, max: number): number {
@@ -194,6 +235,26 @@ export function mergeTelemetryMaps(
     t.savePercentage = Number(row.statValue.toFixed(1));
   }
 
+  for (const row of buckets.phys_ts || []) {
+    const t = ensure(row.participantId);
+    if (row.statValue > 10) t.topSpeedKmh = Number(row.statValue.toFixed(1));
+  }
+
+  for (const row of buckets.big_chance_created || []) {
+    const t = ensure(row.participantId);
+    t.bigChancesCreated = Math.round(row.statValue);
+  }
+
+  for (const row of buckets.defensive_contributions || []) {
+    const t = ensure(row.participantId);
+    t.defensiveActionsPer90 = Number(row.statValue.toFixed(2));
+  }
+
+  for (const row of buckets.ball_recovery || []) {
+    const t = ensure(row.participantId);
+    t.ballRecoveriesPer90 = Number(row.statValue.toFixed(2));
+  }
+
   return result;
 }
 
@@ -206,6 +267,11 @@ export async function fetchLeaguePlayerStats(
   const sId = String(seasonId || '').trim();
   if (!lId || !sId) return new Map();
 
+  if (Array.isArray(customUrls) && customUrls.length > 0) {
+    registerLeagueOptaUrls(lId, sId, customUrls);
+  }
+  const effectiveUrls = customUrls?.length ? customUrls : leagueOptaUrlRegistry.get(lId)?.urls;
+
   const cacheKey = `${lId}:${sId}`;
   const existingPromise = leagueStatsCache.get(cacheKey);
   if (existingPromise) return existingPromise;
@@ -213,7 +279,7 @@ export async function fetchLeaguePlayerStats(
   const task = (async () => {
     const urlByKey = new Map<StatFileKey, string>();
     for (const sf of STAT_FILES) {
-      const matchedCustom = customUrls?.find((u) => u.endsWith(`/${sf.file}`));
+      const matchedCustom = effectiveUrls?.find((u) => u.endsWith(`/${sf.file}`));
       urlByKey.set(
         sf.key,
         matchedCustom || `https://data.fotmob.com/stats/${lId}/season/${sId}/${sf.file}`
@@ -372,6 +438,8 @@ export function applyTelemetryToPlayer(
   const computedTacklesInt =
     telemetry.tacklesPer90 !== undefined || telemetry.interceptionsPer90 !== undefined
       ? Number(((telemetry.tacklesPer90 ?? 0) + (telemetry.interceptionsPer90 ?? 0)).toFixed(2))
+      : telemetry.defensiveActionsPer90 !== undefined && player.stats.tacklesInterceptionsPer90 <= 0
+      ? Number((telemetry.defensiveActionsPer90 * 0.48).toFixed(2))
       : player.stats.tacklesInterceptionsPer90;
 
   const nextStats: PlayerSeasonStats = {
@@ -394,9 +462,36 @@ export function applyTelemetryToPlayer(
     savePercentage: telemetry.savePercentage,
   });
 
+  const optaExtras = {
+    ...player.optaExtras,
+    ...(telemetry.topSpeedKmh !== undefined ? { topSpeedKmh: telemetry.topSpeedKmh } : {}),
+    ...(telemetry.lineBreakingPassesPer90 !== undefined
+      ? { lineBreakingPassesPer90: telemetry.lineBreakingPassesPer90 }
+      : {}),
+    ...(telemetry.bigChancesCreated !== undefined
+      ? { bigChancesCreated: telemetry.bigChancesCreated }
+      : {}),
+    ...(telemetry.defensiveActionsPer90 !== undefined
+      ? { defensiveActionsPer90: telemetry.defensiveActionsPer90 }
+      : {}),
+    ...(telemetry.ballRecoveriesPer90 !== undefined
+      ? { ballRecoveriesPer90: telemetry.ballRecoveriesPer90 }
+      : {}),
+    ...(telemetry.possWonAtt3rdPer90 !== undefined
+      ? { possWonAtt3rdPer90: telemetry.possWonAtt3rdPer90 }
+      : {}),
+    ...(telemetry.savePercentage !== undefined
+      ? { savePercentage: telemetry.savePercentage }
+      : {}),
+  };
+
+  const sources = Array.from(new Set([...(player.dataSources || []), 'Opta/FotMob Live']));
+
   return {
     ...player,
     stats: nextStats,
     radar: nextRadar,
+    optaExtras: Object.keys(optaExtras).length > 0 ? optaExtras : player.optaExtras,
+    dataSources: sources,
   };
 }

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { MarketValuePoint } from '../types/footy';
 import { formatMarketValue } from '../utils/analytics';
 
@@ -8,6 +8,11 @@ interface MarketValueChartProps {
 
 export function MarketValueChart({ history }: MarketValueChartProps) {
   const [activeIndex, setActiveIndex] = useState<number>(Math.max(0, history.length - 1));
+
+  const latestDate = history[history.length - 1]?.date || '';
+  useEffect(() => {
+    setActiveIndex(Math.max(0, history.length - 1));
+  }, [history.length, latestDate]);
 
   if (history.length === 0) {
     return (
@@ -46,7 +51,8 @@ export function MarketValueChart({ history }: MarketValueChartProps) {
     padTop + plotH
   } L ${points[0].x.toFixed(1)} ${padTop + plotH} Z`;
 
-  const activePoint = points[activeIndex] ?? points[points.length - 1];
+  const safeIndex = Math.min(activeIndex, points.length - 1);
+  const activePoint = points[safeIndex] ?? points[points.length - 1];
   const yTicks = [0, 0.5, 1].map((t) => ({
     y: padTop + plotH - t * plotH,
     label: formatMarketValue(minVal + t * (maxVal - minVal)),
@@ -61,6 +67,14 @@ export function MarketValueChart({ history }: MarketValueChartProps) {
           </span>
           <span aria-hidden="true">·</span>
           <span>{activePoint.club}</span>
+          {latestDate && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono-num text-[11px] text-[#136F73] dark:text-[#2DD4BF]">
+                Update Terkini: {latestDate}
+              </span>
+            </>
+          )}
         </div>
         <div className="font-mono-num text-sm font-semibold text-emerald-600 dark:text-emerald-400">
           {formatMarketValue(activePoint.valueEur)}

@@ -36,6 +36,7 @@ import {
   getCachedPlayers,
   getGasApiUrl,
   getPlayer,
+  MANAGERS_UPDATED_EVENT,
   PLAYERS_UPDATED_EVENT,
 } from './services/gasApi';
 import type { Article, Player, TeamManagerProfile } from './types/footy';
@@ -83,6 +84,7 @@ export default function App() {
   const [activePlayer, setActivePlayer] = useState<Player | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>(['1467236', '934235']);
   const [fitPlayerId, setFitPlayerId] = useState<string | undefined>(undefined);
+  const [fitManagerId, setFitManagerId] = useState<string | undefined>(undefined);
   const [explorerTarget, setExplorerTarget] = useState<{
     leagueId?: string;
     clubId?: string;
@@ -154,8 +156,20 @@ export default function App() {
         setPlayers(getCachedPlayers());
       }
     };
+    const handleManagersUpdated = (ev: Event) => {
+      const detail = (ev as CustomEvent<TeamManagerProfile[]>).detail;
+      if (Array.isArray(detail) && detail.length > 0) {
+        setManagers(detail);
+      } else {
+        setManagers(getCachedManagers());
+      }
+    };
     window.addEventListener(PLAYERS_UPDATED_EVENT, handlePlayersUpdated);
-    return () => window.removeEventListener(PLAYERS_UPDATED_EVENT, handlePlayersUpdated);
+    window.addEventListener(MANAGERS_UPDATED_EVENT, handleManagersUpdated);
+    return () => {
+      window.removeEventListener(PLAYERS_UPDATED_EVENT, handlePlayersUpdated);
+      window.removeEventListener(MANAGERS_UPDATED_EVENT, handleManagersUpdated);
+    };
   }, []);
 
   const openPlayerProfile = (player: Player) => {
@@ -207,8 +221,9 @@ export default function App() {
     window.scrollTo(0, 0);
   };
 
-  const handleOpenFitEngine = (fotmobId: string) => {
+  const handleOpenFitEngine = (fotmobId: string, managerId?: string) => {
     setFitPlayerId(fotmobId);
+    setFitManagerId(managerId);
     setSection('fit');
     window.scrollTo(0, 0);
   };
@@ -525,7 +540,11 @@ export default function App() {
           )}
 
           {section === 'matches' && (
-            <WorldMatchesView players={players} onOpenPlayer={openPlayerProfile} />
+            <WorldMatchesView
+              players={players}
+              managers={managers}
+              onOpenPlayer={openPlayerProfile}
+            />
           )}
 
           {section === 'compare' && (
@@ -538,7 +557,11 @@ export default function App() {
           )}
 
           {section === 'squads' && (
-            <SquadBuilderView players={players} onOpenPlayer={openPlayerProfile} />
+            <SquadBuilderView
+              players={players}
+              managers={managers}
+              onOpenPlayer={openPlayerProfile}
+            />
           )}
 
           {section === 'fit' && (
@@ -546,6 +569,7 @@ export default function App() {
               players={players}
               managers={managers}
               initialPlayerId={fitPlayerId}
+              initialManagerId={fitManagerId}
               onOpenPlayer={openPlayerProfile}
             />
           )}
@@ -557,6 +581,7 @@ export default function App() {
           {section === 'profile' && activePlayer && (
             <PlayerProfileView
               player={activePlayer}
+              managers={managers}
               onBack={() => setSection(previousSection)}
               onAddToCompare={handleAddToCompare}
               onOpenFitEngine={handleOpenFitEngine}
