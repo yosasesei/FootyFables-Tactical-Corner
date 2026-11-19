@@ -1,0 +1,8 @@
+{
+  "name": "FootyFables",
+  "description": "Advanced football tactical editorial, global player intelligence, comparison lab, and tactical fit scouting platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
